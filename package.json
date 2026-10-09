@@ -1,0 +1,16 @@
+{
+  "name": "maldoori-rmm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "check": "node --check server.js && node --check src/app.js && node --check rmm-server.js && node --check lib/mesh.js && node --check src/live.js",
+    "live": "node --env-file=.env rmm-server.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
+  }
+}

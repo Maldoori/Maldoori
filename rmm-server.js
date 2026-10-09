@@ -1,0 +1,144 @@
+import http from 'node:http';
+import { readFile, mkdir, stat } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { MeshClient } from './lib/mesh.js';
+
+const root = import.meta.dirname;
+let credentials = {};
+if (process.env.CREDENTIALS_FILE) {
+  const metadata = await stat(process.env.CREDENTIALS_FILE);
+  if (!metadata.isFile() || (metadata.mode & 0o077)) throw new Error('Credentials file must be a regular file with owner-only permissions (chmod 600).');
+  try { credentials = JSON.parse(await readFile(process.env.CREDENTIALS_FILE, 'utf8')); }
+  catch { throw new Error('Cannot read credentials file as JSON.'); }
+  if (!credentials || typeof credentials !== 'object' || Array.isArray(credentials)) throw new Error('Invalid credentials file format.');
+}
+const setting = name => process.env[name] ?? credentials[name];
+const publicUrl = new URL(setting('PUBLIC_URL') || 'http://127.0.0.1:3001');
+if (publicUrl.protocol !== 'https:' && !(publicUrl.protocol === 'http:' && ['localhost','127.0.0.1'].includes(publicUrl.hostname))) throw new Error('PUBLIC_URL must use HTTPS except for local development.');
+const username = setting('RMM_USERNAME') || 'admin';
+if (typeof setting('RMM_PASSWORD') !== 'string' || setting('RMM_PASSWORD').length < 16) throw new Error('Set RMM_PASSWORD to a unique password of at least 16 characters.');
+const salt = randomBytes(32), passwordHash = scryptSync(setting('RMM_PASSWORD'), salt, 64);
+const mesh = new MeshClient({ url: setting('MESH_URL'), username: setting('MESH_USERNAME'), password: setting('MESH_PASSWORD') });
+const dataDir = resolve(process.env.DATA_DIR || resolve(root, 'data'));
+await mkdir(dataDir, { recursive: true, mode: 0o700 });
+const db = new DatabaseSync(resolve(dataDir, 'rmm.sqlite'));
+db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS companies (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL);');
+const sessions = new Map(), attempts = new Map();
+const lifetime = 8 * 60 * 60 * 1000;
+let snapshot = { groups: [], devices: [], lastSync: null, error: 'Waiting for first MeshCentral synchronization.' };
+let syncing;
+const audit = (action, target) => db.prepare('INSERT INTO audit(at,action,target) VALUES (?,?,?)').run(new Date().toISOString(), action, target);
+function synchronize() {
+  if (syncing) return syncing;
+  syncing = (async () => {
+    try {
+      const [groups, nodes] = await Promise.all([mesh.request('meshes'), mesh.request('nodes')]);
+      if (!Array.isArray(groups.meshes) || !nodes.nodes || typeof nodes.nodes !== 'object') throw new Error('Unexpected MeshCentral inventory response.');
+      const mapped = db.prepare('SELECT * FROM companies').all();
+      const groupMap = new Map(groups.meshes.map(g => [g._id, g]));
+      const companyMap = new Map(mapped.map(c => [c.id, c.name]));
+      const devices = Object.entries(nodes.nodes).flatMap(([groupId, items]) => {
+        if (!Array.isArray(items)) throw new Error('Unexpected MeshCentral device list.');
+        return items.filter(n => typeof n._id === 'string').map(n => ({
+          id: n._id, name: n.name || 'Unnamed device', groupId,
+          company: companyMap.get(groupId) || groupMap.get(groupId)?.name || 'Unmapped group',
+          mapped: companyMap.has(groupId), os: n.osdesc || 'Not reported',
+          online: Boolean((n.conn || 0) & 1), desktopUrl: mesh.desktopUrl(n._id)
+        }));
+      });
+      snapshot = { groups: groups.meshes.map(g => ({ id: g._id, name: g.name, type: g.mtype })), devices, lastSync: new Date().toISOString(), error: null };
+    } catch (error) { snapshot.error = error.message; }
+  })().finally(() => syncing = null);
+  return syncing;
+}
+await synchronize();
+const poll = setInterval(synchronize, 30000); poll.unref();
+const cleanup = setInterval(() => {
+  const now = Date.now();
+  for (const [id, session] of sessions) if (session.expires < now) sessions.delete(id);
+  for (const [ip, entry] of attempts) if (entry.until < now) attempts.delete(ip);
+}, 60000); cleanup.unref();
+function session(req) {
+  const id = /(?:^|;\s*)maldoori_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie || '')?.[1];
+  const value = sessions.get(id);
+  return value && value.expires > Date.now() ? { id, ...value } : null;
+}
+function reply(res, status, value) { res.writeHead(status, { 'Content-Type':'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); }
+async function body(req) {
+  if (!req.headers['content-type']?.startsWith('application/json')) throw Object.assign(new Error('Use JSON request bodies.'), { status: 415 });
+  let content = '';
+  for await (const part of req) { content += part; if (Buffer.byteLength(content) > 16384) throw Object.assign(new Error('Request too large.'), { status: 413 }); }
+  try { return JSON.parse(content); } catch { throw Object.assign(new Error('Invalid JSON.'), { status: 400 }); }
+}
+const cookie = (value, age) => `maldoori_session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${publicUrl.protocol === 'https:' ? '; Secure' : ''}`;
+const server = http.createServer(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+  try {
+    const url = new URL(req.url, publicUrl);
+    if (req.method === 'POST' && req.headers.origin !== publicUrl.origin) return reply(res, 403, { error: 'Request origin rejected.' });
+    if (url.pathname === '/api/login' && req.method === 'POST') {
+      const ip = req.socket.remoteAddress;
+      const entry = attempts.get(ip);
+      if (entry && entry.until > Date.now() && entry.count >= 5) return reply(res, 429, { error: 'Too many login attempts. Try again in 15 minutes.' });
+      const input = await body(req);
+      const supplied = scryptSync(typeof input.password === 'string' ? input.password : '', salt, 64);
+      if (input.username !== username || !timingSafeEqual(supplied, passwordHash)) {
+        attempts.set(ip, { count: (entry && entry.until > Date.now() ? entry.count : 0) + 1, until: entry && entry.until > Date.now() ? entry.until : Date.now() + 900000 });
+        return reply(res, 401, { error: 'Invalid username or password.' });
+      }
+      attempts.delete(ip);
+      const id = randomBytes(32).toString('hex'); sessions.set(id, { expires: Date.now() + lifetime });
+      res.setHeader('Set-Cookie', cookie(id, lifetime / 1000));
+      audit('login', username); return reply(res, 200, { ok: true });
+    }
+    if (url.pathname.startsWith('/api/')) {
+      const current = session(req);
+      if (!current) return reply(res, 401, { error: 'Sign in to continue.' });
+      if (req.method === 'POST' && url.pathname === '/api/logout') { sessions.delete(current.id); res.setHeader('Set-Cookie', cookie('', 0)); return reply(res, 200, { ok: true }); }
+      if (req.method === 'GET' && url.pathname === '/api/inventory') return reply(res, 200, { ...snapshot, companies: db.prepare('SELECT * FROM companies ORDER BY name').all() });
+      if (req.method === 'POST' && url.pathname === '/api/sync') { await synchronize(); return reply(res, snapshot.error ? 502 : 200, snapshot.error ? { error: snapshot.error } : { ok:true }); }
+      if (req.method === 'POST' && url.pathname === '/api/companies') {
+        const input = await body(req);
+        const name = typeof input.name === 'string' ? input.name.trim() : '';
+        if (!name || name.length > 120) return reply(res, 400, { error: 'Enter a company name of 1–120 characters.' });
+        if (db.prepare('SELECT id FROM companies WHERE name=?').get(name)) return reply(res, 409, { error: 'That company already exists.' });
+        let id = input.groupId;
+        if (id) {
+          const result = await mesh.request('meshes');
+          if (!result.meshes?.some(g => g._id === id && g.mtype === 2)) return reply(res, 400, { error: 'Select an accessible agent device group.' });
+          if (db.prepare('SELECT id FROM companies WHERE id=?').get(id)) return reply(res, 409, { error: 'That device group already belongs to a company.' });
+        } else {
+          const result = await mesh.request('createmesh', { meshname: name, meshtype: 2, desc: 'Managed through Maldoori RMM' });
+          id = result.meshid;
+          if (typeof id !== 'string' || !id.startsWith('mesh/')) throw new Error('MeshCentral did not return a group ID. Synchronize before retrying; the group may have been created.');
+        }
+        db.prepare('INSERT INTO companies(id,name) VALUES (?,?)').run(id, name);
+        audit('company-linked', id); await synchronize(); return reply(res, 201, { id, name });
+      }
+      if (req.method === 'POST' && url.pathname === '/api/invitation') {
+        const input = await body(req);
+        if (!db.prepare('SELECT id FROM companies WHERE id=?').get(input.groupId || '')) return reply(res, 404, { error: 'Company not found.' });
+        const invite = await mesh.invitation(input.groupId);
+        audit('enrollment-invitation-created', input.groupId);
+        return reply(res, 200, { url: invite, expiresInHours: 24 });
+      }
+      return reply(res, 404, { error:'Not found.' });
+    }
+    const files = { '/':['src/live.html','text/html'], '/src/live.js':['src/live.js','text/javascript'], '/src/live.css':['src/live.css','text/css'] };
+    const file = files[url.pathname];
+    if (!file || req.method !== 'GET') return reply(res, 404, { error:'Not found.' });
+    const content = await readFile(resolve(root, file[0]));
+    res.writeHead(200, { 'Content-Type': file[1] + '; charset=utf-8' }); res.end(content);
+  } catch (error) {
+    // Return only known, credential-free error messages.
+    const safe = error.status || error.message.startsWith('MeshCentral') || error.message.startsWith('Cannot connect') || error.message.startsWith('Unexpected MeshCentral');
+    reply(res, error.status || 502, { error: safe ? error.message : 'Operation failed. Check the integration configuration and account permissions.' });
+  }
+});
+server.listen(Number(process.env.PORT || 3001), process.env.BIND_ADDRESS || '127.0.0.1', () => console.log('Maldoori live backend listening on port ' + (process.env.PORT || 3001)));
+for (const signal of ['SIGTERM','SIGINT']) process.on(signal, () => { clearInterval(poll); clearInterval(cleanup); server.close(() => { db.close(); process.exit(0); }); });
