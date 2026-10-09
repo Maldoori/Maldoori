@@ -25,9 +25,7 @@ function render() {
   document.querySelectorAll('[data-invite]').forEach(button => button.onclick = async () => {
     button.disabled = true; message('');
     try {
-      const value = await api('invitation', {groupId:button.dataset.invite});
-      showDialog(`<h2>Enroll a Windows computer</h2><p class="muted">Share this enrollment link privately with the authorized customer. It expires in 24 hours.</p><a class="invite" href="${escape(value.url)}" target="_blank" rel="noopener noreferrer">${escape(value.url)}</a><ol class="muted"><li>Open the link on the Windows computer.</li><li>Download the matching Windows agent.</li><li>Run the installer with administrator permission and choose Install.</li><li>Leave the computer connected to the internet. It appears after registration and the next synchronization.</li></ol><p class="muted">Agent installation enables ongoing remote management. Explain this to the customer before installation.</p><div class="actions"><button id="copy-invite">Copy link</button><button data-close>Close</button></div>`);
-      $('#copy-invite').onclick = async () => { try { await navigator.clipboard.writeText(value.url); $('#copy-invite').textContent = 'Copied'; } catch { message('Select and copy the displayed link manually.'); } };
+      await createInvitation(button.dataset.invite);
     } catch (error) { message(error.message); }
     finally { button.disabled = false; }
   });
@@ -44,6 +42,29 @@ async function refresh() {
   finally { refreshing = false; }
 }
 function showDialog(html) { $('#modal').innerHTML = html; $('#modal').showModal(); $('#modal').querySelectorAll('[data-close]').forEach(button => button.onclick = () => $('#modal').close()); }
+async function createInvitation(groupId) {
+  const company = inventory.companies.find(c => c.id === groupId);
+  if (!company) throw new Error('Choose an existing company.');
+  const value = await api('invitation', {groupId});
+  showDialog(`<h2>Enroll a Windows computer</h2><p class="muted">Company: <strong>${escape(company.name)}</strong>. Share this enrollment link privately with the authorized customer. It expires in 24 hours.</p><a class="invite" href="${escape(value.url)}" target="_blank" rel="noopener noreferrer">${escape(value.url)}</a><ol class="muted"><li>Open the link on the Windows computer.</li><li>Download the matching Windows agent.</li><li>Run the installer with administrator permission and choose Install.</li><li>Leave the computer connected to the internet. It appears under ${escape(company.name)} after registration and the next synchronization.</li></ol><p class="muted">You can enroll multiple computers using this link while it is valid. Agent installation enables ongoing remote management. Explain this to the customer before installation.</p><div class="actions"><button id="copy-invite">Copy link</button><button data-close>Close</button></div>`);
+  $('#copy-invite').onclick = async () => { try { await navigator.clipboard.writeText(value.url); $('#copy-invite').textContent = 'Copied'; } catch { $('#copy-invite').textContent = 'Select and copy link above'; } };
+}
+$('#add-device').onclick = () => {
+  if (!inventory.companies.length) {
+    showDialog('<h2>Add device</h2><p class="muted">First create a company or link your existing MeshCentral group. Once linked, you can add any number of computers to that company.</p><div class="actions"><button data-close>Cancel</button><button id="setup-company" class="primary">Set up company</button></div>');
+    $('#setup-company').onclick = () => { $('#modal').close(); $('#add-company').click(); };
+    return;
+  }
+  const selected = $('#company-filter').value;
+  showDialog(`<h2>Add device</h2><p class="muted">Choose an existing company and generate its agent enrollment link. The computer appears automatically after the agent is installed and connects.</p><form id="add-device-form"><label>Company<select name="groupId" required>${inventory.companies.map(c => `<option value="${escape(c.id)}" ${c.id === selected ? 'selected' : ''}>${escape(c.name)}</option>`).join('')}</select></label><p id="enrollment-error" role="alert"></p><div class="actions"><button type="button" data-close>Cancel</button><button class="primary">Generate enrollment link</button></div></form>`);
+  $('#add-device-form').onsubmit = async event => {
+    event.preventDefault(); const button = event.target.querySelector('.primary'); button.disabled = true;
+    $('#enrollment-error').textContent = '';
+    try { await createInvitation(new FormData(event.target).get('groupId')); }
+    catch (error) { if ($('#enrollment-error')) $('#enrollment-error').textContent = error.message; }
+    finally { button.disabled = false; }
+  };
+};
 $('#login-form').onsubmit = async event => {
   event.preventDefault(); const button = event.target.querySelector('button'); button.disabled = true;
   try { await api('login', Object.fromEntries(new FormData(event.target))); event.target.reset(); message(''); await refresh(); } catch (error) { message(error.message); } finally { button.disabled = false; }

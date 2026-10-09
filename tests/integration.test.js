@@ -26,7 +26,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       if(input.action==='meshes') output={action:'meshes',tag:input.tag,meshes:groups};
       if(input.action==='nodes') output.nodes=devices;
       if(input.action==='createmesh') { const id='mesh//new-'+groups.length; groups.push({_id:id,name:input.meshname,mtype:input.meshtype}); output={...output,result:'OK',meshid:id}; }
-      if(input.action==='createInviteLink') output.url=`https://localhost:${upstream.address().port}/agentinvite?c=test-invitation`;
+      if(input.action==='createInviteLink') output.url=`https://localhost:${upstream.address().port}/agentinvite?c=test-invitation&group=${encodeURIComponent(input.meshid)}`;
       socket.send(JSON.stringify(output));
     });
   });
@@ -99,6 +99,15 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('[data-invite]').first().click();
       await page.getByRole('heading',{name:'Enroll a Windows computer'}).waitFor();
       assert.match(await page.locator('.invite').getAttribute('href'),/agentinvite/);
+      await page.locator('[data-close]').click();
+      const companiesBefore=(await api('inventory')).data.companies.length;
+      await page.locator('#add-device').click();
+      await page.locator('#add-device-form [name="groupId"]').selectOption(companyId);
+      await page.locator('#add-device-form .primary').click();
+      await page.getByRole('heading',{name:'Enroll a Windows computer'}).waitFor();
+      assert.equal(new URL(await page.locator('.invite').getAttribute('href')).searchParams.get('group'),companyId);
+      assert.match(await page.locator('#modal').textContent(),/New company/);
+      assert.equal((await api('inventory')).data.companies.length,companiesBefore);
       await page.locator('[data-close]').click();
       await page.locator('#add-company').click();
       await page.locator('[name="name"]').fill('Browser company');
