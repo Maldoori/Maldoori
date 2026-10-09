@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "check": "node --check server.js && node --check src/app.js && node --check rmm-server.js && node --check lib/mesh.js && node --check src/live.js",
+    "check": "node --check server.js && node --check src/app.js && node --check rmm-server.js && node --check lib/mesh.js && node --check lib/catalog.js && node --check lib/services.js && node --check src/live.js && node --check scripts/meshcentral-autoconnect.js",
     "live": "node --env-file=.env rmm-server.js",
     "test": "node --test tests/*.test.js"
   },

@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { MeshClient } from './lib/mesh.js';
+import {initializeCatalog,ensureDefaultGroup,catalog,addLocation} from './lib/catalog.js';
+import {serviceCommand,parseServiceOutput} from './lib/services.js';
 
 const root = import.meta.dirname;
 let credentials = {};
@@ -25,6 +27,9 @@ const dataDir = resolve(process.env.DATA_DIR || resolve(root, 'data'));
 await mkdir(dataDir, { recursive: true, mode: 0o700 });
 const db = new DatabaseSync(resolve(dataDir, 'rmm.sqlite'));
 db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS companies (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL);');
+initializeCatalog(db);
+const serviceBusy = new Set();
+let companyBusy = false;
 const sessions = new Map(), attempts = new Map();
 const lifetime = 8 * 60 * 60 * 1000;
 let snapshot = { groups: [], devices: [], lastSync: null, error: 'Waiting for first MeshCentral synchronization.' };
@@ -36,15 +41,20 @@ function synchronize() {
     try {
       const [groups, nodes] = await Promise.all([mesh.request('meshes'), mesh.request('nodes')]);
       if (!Array.isArray(groups.meshes) || !nodes.nodes || typeof nodes.nodes !== 'object') throw new Error('Unexpected MeshCentral inventory response.');
-      const mapped = db.prepare('SELECT * FROM companies').all();
+      const mapped = catalog(db).deviceGroups;
       const groupMap = new Map(groups.meshes.map(g => [g._id, g]));
-      const companyMap = new Map(mapped.map(c => [c.id, c.name]));
+      const companyMap = new Map(mapped.map(g => [g.id, g]));
       const devices = Object.entries(nodes.nodes).flatMap(([groupId, items]) => {
         if (!Array.isArray(items)) throw new Error('Unexpected MeshCentral device list.');
         return items.filter(n => typeof n._id === 'string').map(n => ({
           id: n._id, name: n.name || 'Unnamed device', groupId,
-          company: companyMap.get(groupId) || groupMap.get(groupId)?.name || 'Unmapped group',
+          company: companyMap.get(groupId)?.company || groupMap.get(groupId)?.name || 'Unmapped group',
+          companyId: companyMap.get(groupId)?.company_id || null,
+          locationId: companyMap.get(groupId)?.location_id || null,
+          location: companyMap.get(groupId)?.location || 'Unassigned',
+          groupName: companyMap.get(groupId)?.name || groupMap.get(groupId)?.name || 'Unknown group',
           mapped: companyMap.has(groupId), os: n.osdesc || 'Not reported',
+          windows: [1,2,3,4,42,43].includes(n.agent?.id) || /windows/i.test(n.osdesc || ''),
           online: Boolean((n.conn || 0) & 1), desktopUrl: mesh.desktopUrl(n._id)
         }));
       });
@@ -100,29 +110,89 @@ const server = http.createServer(async (req, res) => {
       const current = session(req);
       if (!current) return reply(res, 401, { error: 'Sign in to continue.' });
       if (req.method === 'POST' && url.pathname === '/api/logout') { sessions.delete(current.id); res.setHeader('Set-Cookie', cookie('', 0)); return reply(res, 200, { ok: true }); }
-      if (req.method === 'GET' && url.pathname === '/api/inventory') return reply(res, 200, { ...snapshot, companies: db.prepare('SELECT * FROM companies ORDER BY name').all() });
+      if (req.method === 'GET' && url.pathname === '/api/inventory') return reply(res, 200, { ...snapshot, ...catalog(db) });
       if (req.method === 'POST' && url.pathname === '/api/sync') { await synchronize(); return reply(res, snapshot.error ? 502 : 200, snapshot.error ? { error: snapshot.error } : { ok:true }); }
       if (req.method === 'POST' && url.pathname === '/api/companies') {
         const input = await body(req);
         const name = typeof input.name === 'string' ? input.name.trim() : '';
         if (!name || name.length > 120) return reply(res, 400, { error: 'Enter a company name of 1–120 characters.' });
+        if (companyBusy) return reply(res,409,{error:'Another company update is in progress. Try again after it completes.'});
+        companyBusy = true;
+        try {
         if (db.prepare('SELECT id FROM companies WHERE name=?').get(name)) return reply(res, 409, { error: 'That company already exists.' });
         let id = input.groupId;
         if (id) {
           const result = await mesh.request('meshes');
           if (!result.meshes?.some(g => g._id === id && g.mtype === 2)) return reply(res, 400, { error: 'Select an accessible agent device group.' });
-          if (db.prepare('SELECT id FROM companies WHERE id=?').get(id)) return reply(res, 409, { error: 'That device group already belongs to a company.' });
+          if (db.prepare('SELECT id FROM device_groups WHERE id=?').get(id)) return reply(res, 409, { error: 'That device group already belongs to a company.' });
         } else {
           const result = await mesh.request('createmesh', { meshname: name, meshtype: 2, desc: 'Managed through Maldoori RMM' });
           id = result.meshid;
           if (typeof id !== 'string' || !id.startsWith('mesh/')) throw new Error('MeshCentral did not return a group ID. Synchronize before retrying; the group may have been created.');
         }
         db.prepare('INSERT INTO companies(id,name) VALUES (?,?)').run(id, name);
+        ensureDefaultGroup(db,{id,name});
         audit('company-linked', id); await synchronize(); return reply(res, 201, { id, name });
+        } finally { companyBusy=false; }
+      }
+      if (req.method === 'POST' && url.pathname === '/api/locations') {
+        const input = await body(req), name = typeof input.name==='string' ? input.name.trim() : '';
+        if (!db.prepare('SELECT id FROM companies WHERE id=?').get(input.companyId || '')) return reply(res,404,{error:'Company not found.'});
+        if (!name || name.length>120) return reply(res,400,{error:'Enter a location name of 1–120 characters.'});
+        if (db.prepare('SELECT id FROM locations WHERE company_id=? AND name=?').get(input.companyId,name)) return reply(res,409,{error:'That location already exists in this company.'});
+        const location=addLocation(db,input.companyId,name); audit('location-created',location.id); return reply(res,201,location);
+      }
+      if (req.method === 'POST' && url.pathname === '/api/groups') {
+        const input=await body(req),name=typeof input.name==='string'?input.name.trim():'';
+        const location=db.prepare('SELECT l.*,c.name AS company FROM locations l JOIN companies c ON c.id=l.company_id WHERE l.id=? AND l.company_id=?').get(input.locationId||'',input.companyId||'');
+        if(!location) return reply(res,400,{error:'Choose a location belonging to this company.'});
+        if(!name||name.length>120) return reply(res,400,{error:'Enter a group name of 1–120 characters.'});
+        if(companyBusy) return reply(res,409,{error:'Another company or group update is in progress.'});
+        companyBusy=true;
+        try {
+          if(db.prepare('SELECT id FROM device_groups WHERE company_id=? AND location_id=? AND name=?').get(input.companyId,input.locationId,name)) return reply(res,409,{error:'That device group already exists at this location.'});
+          let id=input.groupId;
+          if(id){
+            if(db.prepare('SELECT id FROM device_groups WHERE id=?').get(id)) return reply(res,409,{error:'This MeshCentral group is already assigned.'});
+            const available=await mesh.request('meshes');
+            if(!available.meshes?.some(g=>g._id===id&&g.mtype===2)) return reply(res,400,{error:'Select an accessible agent group.'});
+          }else{
+            const created=await mesh.request('createmesh',{meshname:`${location.company} / ${location.name} / ${name}`,meshtype:2,desc:'Maldoori company location group'});id=created.meshid;
+            if(typeof id!=='string'||!id.startsWith('mesh/')) throw new Error('MeshCentral did not return the new group ID. Synchronize before retrying.');
+          }
+          db.prepare('INSERT INTO device_groups(id,company_id,location_id,name) VALUES (?,?,?,?)').run(id,input.companyId,input.locationId,name);
+          audit('device-group-linked',id);await synchronize();return reply(res,201,{id,name});
+        }finally{companyBusy=false;}
+      }
+      if(req.method==='POST' && url.pathname==='/api/company-update'){
+        const input=await body(req),name=typeof input.name==='string'?input.name.trim():'';
+        if(!db.prepare('SELECT id FROM companies WHERE id=?').get(input.id||'')) return reply(res,404,{error:'Company not found.'});
+        if(!name||name.length>120) return reply(res,400,{error:'Enter a company name of 1–120 characters.'});
+        if(db.prepare('SELECT id FROM companies WHERE name=? AND id<>?').get(name,input.id)) return reply(res,409,{error:'Company name is already in use.'});
+        db.prepare('UPDATE companies SET name=? WHERE id=?').run(name,input.id);audit('company-renamed',input.id);await synchronize();return reply(res,200,{ok:true});
+      }
+      if(req.method==='POST' && ['/api/services','/api/service-action'].includes(url.pathname)){
+        const input=await body(req);await synchronize();
+        if(snapshot.error) return reply(res,502,{error:snapshot.error});
+        const device=snapshot.devices.find(d=>d.id===input.nodeId);
+        if(!device) return reply(res,404,{error:'Device is not accessible to this integration account.'});
+        if(!device.online) return reply(res,409,{error:'Device is offline.'});
+        if(!device.windows) return reply(res,400,{error:'Windows service management requires a Windows agent.'});
+        if(serviceBusy.has(device.id)) return reply(res,409,{error:'A service request is already running on this device.'});
+        const action=url.pathname==='/api/services'?'list':input.action;
+        if(url.pathname==='/api/service-action' && !['start','stop','restart'].includes(action)) return reply(res,400,{error:'Choose start, stop, or restart.'});
+        const command=serviceCommand(action,input.name||'');serviceBusy.add(device.id);
+        audit('windows-services-'+action+'-requested',device.id+(action==='list'?'':':'+input.name));
+        try{
+          const output=await mesh.request('runcommands',{nodeids:[device.id],type:2,cmds:command.script,reply:true,runAsUser:0},{output:true});
+          const services=parseServiceOutput(output.result,command.marker);
+          audit('windows-services-'+action+'-completed',device.id);
+          return reply(res,200,{nodeId:device.id,services,checkedAt:new Date().toISOString()});
+        }finally{serviceBusy.delete(device.id);}
       }
       if (req.method === 'POST' && url.pathname === '/api/invitation') {
         const input = await body(req);
-        if (!db.prepare('SELECT id FROM companies WHERE id=?').get(input.groupId || '')) return reply(res, 404, { error: 'Company not found.' });
+        if (!db.prepare('SELECT id FROM device_groups WHERE id=?').get(input.groupId || '')) return reply(res, 404, { error: 'Company device group not found.' });
         const invite = await mesh.invitation(input.groupId);
         audit('enrollment-invitation-created', input.groupId);
         return reply(res, 200, { url: invite, expiresInHours: 24 });

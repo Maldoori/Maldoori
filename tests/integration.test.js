@@ -17,6 +17,8 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   const wss = new WebSocketServer({server:upstream});
   const groups = [{_id:'mesh//existing-group',name:'Existing customer',mtype:2}];
   let devices = {'mesh//existing-group':[{_id:'node//original-device',name:'REAL-WINDOWS',conn:1,osdesc:'Windows 11'}]}, fail = false;
+  const mockServices=[{Name:'Spooler',DisplayName:'Print Spooler',State:'Running',StartMode:'Auto',ProcessId:123},{Name:'RpcSs',DisplayName:'Remote Procedure Call',State:'Running',StartMode:'Auto',ProcessId:456}];
+  let commandFailure=false,permissionFailure=false;
   wss.on('connection', (socket, req) => {
     assert.equal(req.headers['x-meshauth'], Buffer.from('test-integration').toString('base64')+','+Buffer.from('test-mesh-password').toString('base64'));
     socket.on('message', raw => {
@@ -27,6 +29,14 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       if(input.action==='nodes') output.nodes=devices;
       if(input.action==='createmesh') { const id='mesh//new-'+groups.length; groups.push({_id:id,name:input.meshname,mtype:input.meshtype}); output={...output,result:'OK',meshid:id}; }
       if(input.action==='createInviteLink') output.url=`https://localhost:${upstream.address().port}/agentinvite?c=test-invitation&group=${encodeURIComponent(input.meshid)}`;
+      if(input.action==='runcommands'){
+        if(permissionFailure){socket.send(JSON.stringify({...output,result:'Access denied'}));return;}
+        assert.equal(input.reply,true);assert.equal(input.type,2);assert.equal(input.runAsUser,0);assert.equal(input.nodeids.length,1);
+        const marker=input.cmds.match(/MALDOORI_[a-f0-9]{24}/)[0];
+        if(input.cmds.includes('Stop-Service'))mockServices[0].State='Stopped';
+        if(input.cmds.includes('Start-Service')||input.cmds.includes('Restart-Service'))mockServices[0].State='Running';
+        output={action:'msg',type:'runcommands',responseid:input.responseid,result:marker+JSON.stringify(commandFailure?{ok:false}:{ok:true,services:mockServices})+marker};
+      }
       socket.send(JSON.stringify(output));
     });
   });
@@ -72,6 +82,29 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('companies',{name:'Existing company',groupId:'mesh//existing-group'})).status,201);
   assert.equal((await api('companies',{name:'Other company',groupId:'mesh//existing-group'})).status,409);
   result=await api('companies',{name:'New company'});assert.equal(result.status,201);const companyId=result.data.id;
+  result=await api('inventory');assert.equal(result.data.locations.length,2);assert.equal(result.data.deviceGroups.length,2);
+  result=await api('locations',{companyId,name:'Branch office'});assert.equal(result.status,201);const branchId=result.data.id;
+  assert.equal((await api('locations',{companyId,name:'Branch office'})).status,409);
+  assert.equal((await api('locations',{companyId:'missing',name:'Branch office'})).status,404);
+  assert.equal((await api('groups',{companyId:'mesh//existing-group',locationId:branchId,name:'Servers'})).status,400);
+  result=await api('groups',{companyId,locationId:branchId,name:'Servers'});assert.equal(result.status,201);const serverGroup=result.data.id;
+  assert.equal((await api('groups',{companyId,locationId:branchId,name:'Servers'})).status,409);
+  devices[serverGroup]=[{_id:'node//branch-server',name:'BRANCH-SERVER',conn:1,osdesc:'Windows Server 2022'}];await api('sync',{});
+  result=await api('inventory');const branchDevice=result.data.devices.find(d=>d.id==='node//branch-server');
+  assert.equal(branchDevice.company,'New company');assert.equal(branchDevice.location,'Branch office');assert.equal(branchDevice.groupName,'Servers');
+  assert.equal((await api('invitation',{groupId:serverGroup})).status,200);
+  result=await api('services',{nodeId:'node//original-device'});assert.equal(result.status,200);assert.equal(result.data.services.length,2);assert.equal(result.data.services.find(s=>s.name==='RpcSs').protected,true);
+  assert.equal((await api('service-action',{nodeId:'node//original-device',action:'stop',name:'RpcSs'})).status,403);
+  assert.equal((await api('service-action',{nodeId:'node//original-device',action:'stop',name:"Spooler';Remove-Item C:"})).status,400);
+  assert.equal((await api('service-action',{nodeId:'node//original-device',action:'execute',name:'Spooler'})).status,400);
+  result=await api('service-action',{nodeId:'node//original-device',action:'stop',name:'Spooler'});assert.equal(result.status,200);assert.equal(result.data.services[0].state,'Stopped');
+  result=await api('service-action',{nodeId:'node//original-device',action:'start',name:'Spooler'});assert.equal(result.data.services[0].state,'Running');
+  assert.equal((await api('service-action',{nodeId:'node//original-device',action:'restart',name:'Spooler'})).status,200);
+  assert.equal((await api('services',{nodeId:'node//unowned'})).status,404);
+  devices['mesh//existing-group'][0].conn=0;assert.equal((await api('services',{nodeId:'node//original-device'})).status,409);devices['mesh//existing-group'][0].conn=1;
+  permissionFailure=true;assert.equal((await api('services',{nodeId:'node//original-device'})).status,502);permissionFailure=false;
+  commandFailure=true;assert.equal((await api('services',{nodeId:'node//original-device'})).status,422);commandFailure=false;
+  devices[serverGroup]=[];
   assert.equal((await api('invitation',{groupId:'mesh//unknown'})).status,404);
   result=await api('invitation',{groupId:companyId});assert.equal(result.status,200);assert.equal(result.data.expiresInHours,24);
   devices[companyId]=[{_id:'node//new-enrolled-device',name:'NEW-PC',conn:1}];
@@ -94,14 +127,17 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('[name="username"]').fill('test-admin');
       await page.locator('[name="password"]').fill('test-rmm-password-long');
       await page.locator('#login-form button').click();
-      await page.getByText('REAL-WINDOWS',{exact:true}).waitFor();
+      await page.locator('#devices').getByText('REAL-WINDOWS',{exact:true}).waitFor();
       assert.equal(await page.locator('[data-remote]').count(),1);
       await page.locator('[data-invite]').first().click();
+      await page.locator('#add-device-form .primary').click();
       await page.getByRole('heading',{name:'Enroll a Windows computer'}).waitFor();
       assert.match(await page.locator('.invite').getAttribute('href'),/agentinvite/);
       await page.locator('[data-close]').click();
       const companiesBefore=(await api('inventory')).data.companies.length;
       await page.locator('#add-device').click();
+      await page.locator('#add-device-form [name="companyId"]').selectOption(companyId);
+      await page.locator('#add-device-form [name="locationId"]').selectOption({label:'Main office'});
       await page.locator('#add-device-form [name="groupId"]').selectOption(companyId);
       await page.locator('#add-device-form .primary').click();
       await page.getByRole('heading',{name:'Enroll a Windows computer'}).waitFor();
@@ -109,10 +145,41 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       assert.match(await page.locator('#modal').textContent(),/New company/);
       assert.equal((await api('inventory')).data.companies.length,companiesBefore);
       await page.locator('[data-close]').click();
+      await page.locator('#add-device').click();
+      await page.locator('#add-device-form [name="companyId"]').selectOption(companyId);
+      await page.locator('#add-device-form [name="locationId"]').selectOption(branchId);
+      assert.equal(await page.locator('#add-device-form [name="groupId"]').inputValue(),serverGroup);
+      await page.locator('#add-device-form .primary').click();
+      await page.getByRole('heading',{name:'Enroll a Windows computer'}).waitFor();
+      assert.equal(new URL(await page.locator('.invite').getAttribute('href')).searchParams.get('group'),serverGroup);
+      await page.locator('[data-close]').click();
+      await page.locator('[data-services]').first().click();
+      await page.locator('#services-body td').filter({hasText:'Print Spooler'}).waitFor();
+      page.on('dialog',dialog=>dialog.accept());
+      await page.locator('[data-service="Spooler"][data-service-action="stop"]').click();
+      await page.waitForFunction(()=>document.querySelector('[data-service="Spooler"][data-service-action="start"]')?.disabled===false);
+      assert.match(await page.locator('#services-body').textContent(),/Stopped/);
+      await page.locator('[data-service="Spooler"][data-service-action="start"]').click();
+      await page.waitForFunction(()=>document.querySelector('[data-service="Spooler"][data-service-action="stop"]')?.disabled===false);
+      assert.equal(await page.locator('[data-service="RpcSs"][data-service-action="stop"]').isDisabled(),true);
+      await page.locator('[data-close]').click();
       await page.locator('#add-company').click();
       await page.locator('[name="name"]').fill('Browser company');
       await page.locator('#company-form .primary').click();
       await page.locator('#companies').getByText('Browser company',{exact:true}).waitFor();
+      await page.locator('#add-location').click();
+      await page.locator('#location-form [name="companyId"]').selectOption({label:'Browser company'});
+      await page.locator('#location-form [name="name"]').fill('Remote office');
+      await page.locator('#location-form .primary').click();
+      await page.locator('#companies').getByText('Remote office',{exact:true}).waitFor();
+      await page.locator('[data-page="groups"]').click();
+      await page.locator('#add-group').click();
+      await page.locator('#group-form [name="companyId"]').selectOption({label:'Browser company'});
+      await page.locator('#group-form [name="locationId"]').selectOption({label:'Remote office'});
+      await page.locator('#group-form [name="name"]').fill('Laptops');
+      await page.locator('#group-form .primary').click();
+      await page.locator('#groups').getByText('Laptops',{exact:true}).waitFor();
+      await page.locator('[data-page="devices"]').click();
       await page.locator('#search').fill('no-such-device');
       assert.equal(await page.locator('[data-remote]').count(),0);
       await page.locator('#search').fill('');
