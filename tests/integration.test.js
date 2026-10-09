@@ -64,7 +64,9 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('login',{username:'test-admin',password:'wrong'})).status,401);
   assert.equal((await api('login',{username:'test-admin',password:'test-rmm-password-long'})).status,200);
   let result=await api('inventory'); assert.equal(result.data.devices[0].name,'REAL-WINDOWS');
-  assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('gotonode'),'original-device');
+  assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('node'),'original-device');
+  assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('viewmode'),'11');
+  assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.has('gotonode'),false);
   assert.equal(result.data.devices[0].mapped,false);
   assert.equal((await api('companies',{name:'Existing company',groupId:'mesh//existing-group'})).status,201);
   assert.equal((await api('companies',{name:'Other company',groupId:'mesh//existing-group'})).status,409);
