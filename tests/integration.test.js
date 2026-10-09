@@ -82,7 +82,12 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('companies',{name:'Existing company',groupId:'mesh//existing-group'})).status,201);
   assert.equal((await api('companies',{name:'Other company',groupId:'mesh//existing-group'})).status,409);
   result=await api('companies',{name:'New company'});assert.equal(result.status,201);const companyId=result.data.id;
-  result=await api('inventory');assert.equal(result.data.locations.length,2);assert.equal(result.data.deviceGroups.length,2);
+  result=await api('customers',{name:'Small business customer'});assert.equal(result.status,201);const customerId=result.data.id;
+  assert.equal((await api('customers',{name:'Small business customer'})).status,409);
+  assert.equal((await api('company-update',{id:companyId,name:'New company',customerId:'missing'})).status,400);
+  assert.equal((await api('company-update',{id:companyId,name:'New company',customerId})).status,200);
+  assert.equal((await api('company-update',{id:'mesh//existing-group',name:'Existing company',customerId})).status,200);
+  result=await api('inventory');assert.equal(result.data.companies.filter(c=>c.customer_id===customerId).length,2);assert.equal(result.data.companies[0].customer,'Small business customer');assert.equal(result.data.locations.length,2);assert.equal(result.data.deviceGroups.length,2);
   result=await api('locations',{companyId,name:'Branch office'});assert.equal(result.status,201);const branchId=result.data.id;
   assert.equal((await api('locations',{companyId,name:'Branch office'})).status,409);
   assert.equal((await api('locations',{companyId:'missing',name:'Branch office'})).status,404);
@@ -137,6 +142,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       const companiesBefore=(await api('inventory')).data.companies.length;
       await page.locator('#add-device').click();
       await page.locator('#add-device-form [name="companyId"]').selectOption(companyId);
+      await page.locator('#add-device-form summary').click();
       await page.locator('#add-device-form [name="locationId"]').selectOption({label:'Main office'});
       await page.locator('#add-device-form [name="groupId"]').selectOption(companyId);
       await page.locator('#add-device-form .primary').click();
@@ -147,6 +153,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('[data-close]').click();
       await page.locator('#add-device').click();
       await page.locator('#add-device-form [name="companyId"]').selectOption(companyId);
+      await page.locator('#add-device-form summary').click();
       await page.locator('#add-device-form [name="locationId"]').selectOption(branchId);
       assert.equal(await page.locator('#add-device-form [name="groupId"]').inputValue(),serverGroup);
       await page.locator('#add-device-form .primary').click();
@@ -171,6 +178,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('#location-form [name="companyId"]').selectOption({label:'Browser company'});
       await page.locator('#location-form [name="name"]').fill('Remote office');
       await page.locator('#location-form .primary').click();
+      await page.locator('.company-row').filter({has:page.getByText('Browser company',{exact:true})}).locator('summary').click();
       await page.locator('#companies').getByText('Remote office',{exact:true}).waitFor();
       await page.locator('[data-page="groups"]').click();
       await page.locator('#add-group').click();

@@ -112,6 +112,13 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/api/logout') { sessions.delete(current.id); res.setHeader('Set-Cookie', cookie('', 0)); return reply(res, 200, { ok: true }); }
       if (req.method === 'GET' && url.pathname === '/api/inventory') return reply(res, 200, { ...snapshot, ...catalog(db) });
       if (req.method === 'POST' && url.pathname === '/api/sync') { await synchronize(); return reply(res, snapshot.error ? 502 : 200, snapshot.error ? { error: snapshot.error } : { ok:true }); }
+      if(req.method==='POST' && url.pathname==='/api/customers'){
+        const input=await body(req),name=typeof input.name==='string'?input.name.trim():'';
+        if(!name||name.length>120)return reply(res,400,{error:'Enter a customer name of 1–120 characters.'});
+        if(db.prepare('SELECT id FROM customers WHERE name=?').get(name))return reply(res,409,{error:'That customer already exists.'});
+        const id=randomBytes(16).toString('hex');db.prepare('INSERT INTO customers(id,name) VALUES (?,?)').run(id,name);
+        audit('customer-created',id);return reply(res,201,{id,name});
+      }
       if (req.method === 'POST' && url.pathname === '/api/companies') {
         const input = await body(req);
         const name = typeof input.name === 'string' ? input.name.trim() : '';
@@ -120,6 +127,7 @@ const server = http.createServer(async (req, res) => {
         companyBusy = true;
         try {
         if (db.prepare('SELECT id FROM companies WHERE name=?').get(name)) return reply(res, 409, { error: 'That company already exists.' });
+        if(input.customerId&&!db.prepare('SELECT id FROM customers WHERE id=?').get(input.customerId))return reply(res,400,{error:'Customer not found.'});
         let id = input.groupId;
         if (id) {
           const result = await mesh.request('meshes');
@@ -130,7 +138,7 @@ const server = http.createServer(async (req, res) => {
           id = result.meshid;
           if (typeof id !== 'string' || !id.startsWith('mesh/')) throw new Error('MeshCentral did not return a group ID. Synchronize before retrying; the group may have been created.');
         }
-        db.prepare('INSERT INTO companies(id,name) VALUES (?,?)').run(id, name);
+        db.prepare('INSERT INTO companies(id,name,customer_id) VALUES (?,?,?)').run(id, name,input.customerId||null);
         ensureDefaultGroup(db,{id,name});
         audit('company-linked', id); await synchronize(); return reply(res, 201, { id, name });
         } finally { companyBusy=false; }
@@ -169,7 +177,8 @@ const server = http.createServer(async (req, res) => {
         if(!db.prepare('SELECT id FROM companies WHERE id=?').get(input.id||'')) return reply(res,404,{error:'Company not found.'});
         if(!name||name.length>120) return reply(res,400,{error:'Enter a company name of 1–120 characters.'});
         if(db.prepare('SELECT id FROM companies WHERE name=? AND id<>?').get(name,input.id)) return reply(res,409,{error:'Company name is already in use.'});
-        db.prepare('UPDATE companies SET name=? WHERE id=?').run(name,input.id);audit('company-renamed',input.id);await synchronize();return reply(res,200,{ok:true});
+        if(input.customerId&&!db.prepare('SELECT id FROM customers WHERE id=?').get(input.customerId))return reply(res,400,{error:'Customer not found.'});
+        db.prepare('UPDATE companies SET name=?,customer_id=? WHERE id=?').run(name,input.customerId===undefined?db.prepare('SELECT customer_id FROM companies WHERE id=?').get(input.id).customer_id:input.customerId||null,input.id);audit('company-renamed',input.id);await synchronize();return reply(res,200,{ok:true});
       }
       if(req.method==='POST' && ['/api/services','/api/service-action'].includes(url.pathname)){
         const input=await body(req);await synchronize();

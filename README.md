@@ -48,3 +48,9 @@ Validation: `npm run check`, `npm test`, and `npm audit --omit=dev`. The integra
 ### Optional one-click desktop launch
 
 On the reviewed MeshCentral 1.1.59 installation at `/opt/meshcentral`, run `sudo python3 /opt/maldoori/scripts/install-meshcentral-autoconnect.py`, then restart MeshCentral. The installer creates a supported custom template under `meshcentral-web/views`; it leaves the package template unchanged and refuses to replace other custom templates. Maldoori links include `maldooriConnect=1`. The hook waits for the selected device, authenticated control connection, and enabled visible Connect button, then clicks the normal button once. Server permissions, session selection, and user consent still apply. It neither retries failed sessions nor bypasses authentication. Desktop-browser template only; native mobile templates are unchanged. Before upgrading MeshCentral, remove this generated override and review/rebuild it for the new version to avoid retaining an outdated frontend. To roll back, remove only `/opt/meshcentral/meshcentral-web/views/default.handlebars` if it contains the Maldoori launch marker, then restart MeshCentral.
+
+### Small business customer organization
+
+The main hierarchy is Customer → Company → Computer. Use Add customer, then Add company and select that customer. A customer can have multiple companies. Edit company assigns existing companies to a customer without moving or reinstalling their agents. Existing companies initially appear under Unassigned customer. These are organization records within the operator workspace, not customer login accounts.
+
+Add device selects the company and defaults to Main office / Default devices. Expand Advanced only when choosing another location or group. Installed computers display their agent-reported names beneath their company and appear automatically after enrollment.
