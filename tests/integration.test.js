@@ -67,6 +67,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('node'),'original-device');
   assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('viewmode'),'11');
   assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.has('gotonode'),false);
+  assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('maldooriConnect'),'1');
   assert.equal(result.data.devices[0].mapped,false);
   assert.equal((await api('companies',{name:'Existing company',groupId:'mesh//existing-group'})).status,201);
   assert.equal((await api('companies',{name:'Other company',groupId:'mesh//existing-group'})).status,409);
