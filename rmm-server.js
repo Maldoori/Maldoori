@@ -32,6 +32,7 @@ const db = new DatabaseSync(resolve(dataDir, 'rmm.sqlite'));
 db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS companies (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL);');
 initializeCatalog(db);
 db.exec('CREATE TABLE IF NOT EXISTS known_devices(id TEXT PRIMARY KEY, group_id TEXT NOT NULL, details TEXT NOT NULL)');
+db.exec('CREATE TABLE IF NOT EXISTS device_preferences(id TEXT PRIMARY KEY,name TEXT,hidden INTEGER NOT NULL DEFAULT 0)');
 const serviceBusy = new Set();
 let companyBusy = false;
 const sessions = new Map(), attempts = new Map();
@@ -80,7 +81,7 @@ function synchronize() {
           location:assignment?.location||'Unassigned',groupName:assignment?.name||groupMap.get(record.group_id).name,
           mapped:Boolean(assignment)});
       }
-      snapshot = { groups: groups.meshes.map(g => ({ id: g._id, name: g.name, type: g.mtype })), devices, lastSync: new Date().toISOString(), error: null };
+      snapshot = { groups: groups.meshes.map(g => ({ id: g._id, name: g.name, type: g.mtype })), devices:devices.flatMap(device=>{const preference=db.prepare('SELECT * FROM device_preferences WHERE id=?').get(device.id);return preference?.hidden?[]:[{...device,agentName:device.name,name:preference?.name||device.name}];}), lastSync: new Date().toISOString(), error: null };
     } catch (error) { snapshot.error = error.message; }
   })().finally(() => syncing = null);
   return syncing;
@@ -134,6 +135,23 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/api/logout') { sessions.delete(current.id); res.setHeader('Set-Cookie', cookie('', 0)); return reply(res, 200, { ok: true }); }
       if (req.method === 'GET' && url.pathname === '/api/inventory') return reply(res, 200, { ...snapshot, ...catalog(db) });
       if (req.method === 'POST' && url.pathname === '/api/sync') { await synchronize(); return reply(res, snapshot.error ? 502 : 200, snapshot.error ? { error: snapshot.error } : { ok:true }); }
+      if(req.method==='POST' && ['/api/device-update','/api/device-delete'].includes(url.pathname)){
+        const input=await body(req);await synchronize();
+        if(snapshot.error)return reply(res,502,{error:snapshot.error});
+        const device=snapshot.devices.find(d=>d.id===input.id);
+        if(!device)return reply(res,404,{error:'Computer not found in your accessible inventory.'});
+        if(url.pathname==='/api/device-update'){
+          const name=typeof input.name==='string'?input.name.trim():'';
+          if(!name||name.length>120)return reply(res,400,{error:'Enter a computer display name of 1–120 characters.'});
+          db.prepare('INSERT INTO device_preferences(id,name,hidden) VALUES (?,?,0) ON CONFLICT(id) DO UPDATE SET name=excluded.name').run(device.id,name);
+          audit('computer-renamed',device.id);
+        }else{
+          if(input.confirm!==true)return reply(res,400,{error:'Confirm removal of this computer from Maldoori.'});
+          db.prepare('INSERT INTO device_preferences(id,hidden) VALUES (?,1) ON CONFLICT(id) DO UPDATE SET hidden=1').run(device.id);
+          audit('computer-removed',device.id);
+        }
+        await synchronize();return reply(res,200,{ok:true});
+      }
       if(req.method==='GET' && url.pathname==='/api/acronis')return reply(res,200,acronisConnection);
       if(req.method==='POST' && url.pathname==='/api/acronis-connect'){
         try{acronisConnection=await acronis.testConnection();audit('acronis-connection-tested','acronis');return reply(res,200,acronisConnection);}

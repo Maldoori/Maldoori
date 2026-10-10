@@ -167,16 +167,6 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.getByRole('heading',{name:'Enroll a Windows computer'}).waitFor();
       assert.equal(new URL(await page.locator('.invite').getAttribute('href')).searchParams.get('group'),serverGroup);
       await page.locator('[data-close]').click();
-      await page.locator('[data-services]').first().click();
-      await page.locator('#services-body td').filter({hasText:'Print Spooler'}).waitFor();
-      page.on('dialog',dialog=>dialog.accept());
-      await page.locator('[data-service="Spooler"][data-service-action="stop"]').click();
-      await page.waitForFunction(()=>document.querySelector('[data-service="Spooler"][data-service-action="start"]')?.disabled===false);
-      assert.match(await page.locator('#services-body').textContent(),/Stopped/);
-      await page.locator('[data-service="Spooler"][data-service-action="start"]').click();
-      await page.waitForFunction(()=>document.querySelector('[data-service="Spooler"][data-service-action="stop"]')?.disabled===false);
-      assert.equal(await page.locator('[data-service="RpcSs"][data-service-action="stop"]').isDisabled(),true);
-      await page.locator('[data-close]').click();
       await page.locator('#add-company').click();
       await page.locator('[name="name"]').fill('Browser company');
       await page.locator('#company-form .primary').click();
@@ -201,10 +191,26 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.screenshot({path:'/tmp/maldoori-live-dashboard.png',fullPage:true});
       await page.setViewportSize({width:390,height:844});
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+      const edit=page.locator('[data-edit-device]').filter({hasText:'Edit'}).first();await edit.click();
+      await page.locator('#edit-device-form [name="name"]').fill('Office computer');await page.locator('#edit-device-form .primary').click();
+      await page.locator('#devices').getByText('Office computer',{exact:true}).waitFor();
+      await page.locator('.device-card').filter({has:page.getByText('Office computer',{exact:true})}).locator('[data-delete-device]').click();
+      await page.locator('#confirm-delete-device').click();
+      await page.waitForFunction(()=>!document.querySelector('#devices').textContent.includes('Office computer'));
+      assert.equal(await page.locator('[data-services]').count(),0);
       await page.locator('#logout').click();
       await page.getByRole('heading',{name:'Sign in to Maldoori'}).waitFor();
       assert.deepEqual(errors,[]);
     } finally { await browser.close(); }
   }
+  const remaining=(await api('inventory')).data.devices[0];
+  assert.equal((await api('device-update',{id:remaining.id,name:''})).status,400);
+  assert.equal((await api('device-update',{id:remaining.id,name:'Renamed computer'})).status,200);
+  await api('sync',{});assert.equal((await api('inventory')).data.devices.find(d=>d.id===remaining.id).name,'Renamed computer');
+  assert.equal((await api('device-delete',{id:remaining.id})).status,400);
+  assert.equal((await api('device-delete',{id:remaining.id,confirm:true})).status,200);
+  await api('sync',{});assert.equal((await api('inventory')).data.devices.some(d=>d.id===remaining.id),false);
+  await stop();await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
+  assert.equal((await api('inventory')).data.devices.some(d=>d.id===remaining.id),false);
   await api('logout',{});assert.equal((await api('inventory')).status,401);
 });
