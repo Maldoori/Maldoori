@@ -38,12 +38,38 @@ function render() {
   setFilter('#company-filter',inventory.companies,'All companies');
   setFilter('#location-filter',inventory.locations.filter(l=>!$('#company-filter').value||l.company_id===$('#company-filter').value),'All locations');
   setFilter('#group-filter',inventory.deviceGroups.filter(g=>(!$('#company-filter').value||g.company_id===$('#company-filter').value)&&(!$('#location-filter').value||g.location_id===$('#location-filter').value)),'All groups');
-  $('#devices').innerHTML=devicesFiltered().map(d=>`<article class="device-card"><div class="device-card-heading"><span class="computer-icon" aria-hidden="true">▣</span><div><button class="text-button device-name" data-manage="${escape(d.id)}">${escape(d.name)}</button><p>${escape(d.company)}</p></div><span class="badge ${d.online?'':'offline'}">${d.online?'Online':'Offline'}</span></div><div class="device-metrics">${['CPU','Memory','Disk'].map(label=>`<div class="metric"><div><span>${label}</span><span class="metric-value">Not available</span></div><div class="metric-track"></div></div>`).join('')}</div><div class="device-info"><p>▦ ${escape(d.company)}</p><p>⌖ ${escape(d.location)}</p><p>${escape(d.os)}</p><p>Group: <strong>${escape(d.groupName)}</strong></p>${d.mapped?'':'<p class="warning">Group not linked to a company</p>'}</div><button class="primary connect-device" data-remote="${escape(d.id)}" ${!d.online||inventory.error?'disabled':''}>Connect Now ↗</button><div class="device-card-actions"><button data-edit-device="${escape(d.id)}">Edit</button><button class="danger" data-delete-device="${escape(d.id)}">Delete</button>${d.mapped?`<button data-invite="${escape(d.companyId)}">Agent</button>`:''}</div></article>`).join('')||'<p class="empty">No matching computers. Use Add device to generate an enrollment link.</p>';
+  $('#devices').innerHTML=devicesFiltered().map(d=>`<article class="device-card" data-device-card="${escape(d.id)}"><div class="device-card-heading"><span class="computer-icon" aria-hidden="true">▣</span><div><button class="text-button device-name" data-manage="${escape(d.id)}">${escape(d.name)}</button><p>${escape(d.company)}</p></div><span class="badge ${d.online?'':'offline'}">${d.online?'Online':'Offline'}</span></div><div class="device-metrics">${['CPU','Memory','Disk'].map(label=>`<div class="metric"><div><span>${label}</span><span class="metric-value" data-metric-value="${label.toLowerCase()}">Not available</span></div><div class="metric-track"><div data-metric-bar="${label.toLowerCase()}"></div></div></div>`).join('')}<p class="metric-status" data-metric-status>Awaiting readings</p></div><div class="device-info"><p>▦ ${escape(d.company)}</p><p>⌖ ${escape(d.location)}</p><p>${escape(d.os)}</p><p>Group: <strong>${escape(d.groupName)}</strong></p>${d.mapped?'':'<p class="warning">Group not linked to a company</p>'}</div><button class="primary connect-device" data-remote="${escape(d.id)}" ${!d.online||inventory.error?'disabled':''}>Connect Now ↗</button><div class="device-card-actions"><button data-edit-device="${escape(d.id)}">Edit</button><button class="danger" data-delete-device="${escape(d.id)}">Delete</button>${d.mapped?`<button data-invite="${escape(d.companyId)}">Agent</button>`:''}</div></article>`).join('')||'<p class="empty">No matching computers. Use Add device to generate an enrollment link.</p>';
 
   bind('[data-invite]',b=>enroll(b.dataset.invite));bind('[data-group-invite]',b=>{const g=inventory.deviceGroups.find(g=>g.id===b.dataset.groupInvite);enroll(g.company_id,g.location_id,g.id);});
   bind('[data-edit-device]',b=>editDevice(b.dataset.editDevice));bind('[data-delete-device]',b=>deleteDevice(b.dataset.deleteDevice));
   bind('[data-remote]',b=>openRemote(b.dataset.remote));bind('[data-manage]',b=>manageDevice(b.dataset.manage));
-  bind('[data-edit-company]',b=>renameCompany(b.dataset.editCompany));bind('[data-company-location]',b=>locationForm(b.dataset.companyLocation));bind('[data-link-group]',b=>groupForm('', '', b.dataset.linkGroup));changePage(page);
+  bind('[data-edit-company]',b=>renameCompany(b.dataset.editCompany));bind('[data-company-location]',b=>locationForm(b.dataset.companyLocation));bind('[data-link-group]',b=>groupForm('', '', b.dataset.linkGroup));changePage(page);loadMetrics();
+}
+const metrics=new Map(),metricsPending=new Set();
+function paintMetrics(d){
+  const card=[...document.querySelectorAll('[data-device-card]')].find(c=>c.dataset.deviceCard===d.id);if(!card)return;
+  const reading=metrics.get(d.id),status=card.querySelector('[data-metric-status]');
+  if(!d.online){status.textContent='Computer offline';return;}
+  if(!d.windows){status.textContent='Windows metrics only';return;}
+  if(!reading){status.textContent='Collecting live readings…';return;}
+  if(reading.error){status.textContent=reading.error;return;}
+  for(const key of ['cpu','memory','disk']){
+    card.querySelector(`[data-metric-value="${key}"]`).textContent=reading[key]+'%';
+    card.querySelector(`[data-metric-bar="${key}"]`).style.width=reading[key]+'%';
+  }
+  status.textContent='System drive '+reading.diskName+' · Read at '+new Date(reading.checkedAt).toLocaleTimeString();
+}
+async function loadMetrics(){
+  const queue=devicesFiltered();queue.forEach(paintMetrics);
+  async function worker(){for(let d;(d=queue.shift());){
+    if(!d.online||!d.windows||inventory.error||metricsPending.has(d.id))continue;
+    const prior=metrics.get(d.id);if(prior&&Date.now()-prior.at<30000)continue;
+    metricsPending.add(d.id);
+    try{metrics.set(d.id,{...await api('telemetry',{nodeId:d.id}),at:Date.now()});}
+    catch(error){metrics.set(d.id,{error:error.message,at:Date.now()});}
+    finally{metricsPending.delete(d.id);const current=inventory.devices.find(x=>x.id===d.id);if(current)paintMetrics(current);}
+  }}
+  await Promise.all([worker(),worker()]);
 }
 function bind(selector,handler){document.querySelectorAll(selector).forEach(b=>b.onclick=()=>handler(b));}
 async function refresh() {

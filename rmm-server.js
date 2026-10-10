@@ -3,6 +3,7 @@ import { readFile, mkdir, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import {telemetryCommand,parseTelemetry} from './lib/telemetry.js';
 import {AcronisClient} from './lib/acronis.js';
 import { MeshClient } from './lib/mesh.js';
 import {initializeCatalog,ensureDefaultGroup,catalog,addLocation} from './lib/catalog.js';
@@ -33,6 +34,7 @@ db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS companies (id TEXT 
 initializeCatalog(db);
 db.exec('CREATE TABLE IF NOT EXISTS known_devices(id TEXT PRIMARY KEY, group_id TEXT NOT NULL, details TEXT NOT NULL)');
 db.exec('CREATE TABLE IF NOT EXISTS device_preferences(id TEXT PRIMARY KEY,name TEXT,hidden INTEGER NOT NULL DEFAULT 0)');
+const telemetryCache=new Map(),telemetryBusy=new Map();
 const serviceBusy = new Set();
 let companyBusy = false;
 const sessions = new Map(), attempts = new Map();
@@ -135,6 +137,25 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/api/logout') { sessions.delete(current.id); res.setHeader('Set-Cookie', cookie('', 0)); return reply(res, 200, { ok: true }); }
       if (req.method === 'GET' && url.pathname === '/api/inventory') return reply(res, 200, { ...snapshot, ...catalog(db) });
       if (req.method === 'POST' && url.pathname === '/api/sync') { await synchronize(); return reply(res, snapshot.error ? 502 : 200, snapshot.error ? { error: snapshot.error } : { ok:true }); }
+      if(req.method==='POST' && url.pathname==='/api/telemetry'){
+        const input=await body(req);await synchronize();
+        if(snapshot.error)return reply(res,502,{error:snapshot.error});
+        const device=snapshot.devices.find(d=>d.id===input.nodeId);
+        if(!device)return reply(res,404,{error:'Computer not found.'});
+        if(!device.online)return reply(res,409,{error:'Computer is offline.'});
+        if(!device.windows)return reply(res,400,{error:'Metrics currently support Windows computers.'});
+        const cached=telemetryCache.get(device.id);
+        if(cached&&Date.now()-Date.parse(cached.checkedAt)<30000)return reply(res,200,cached);
+        if(!telemetryBusy.has(device.id)){
+          if(telemetryBusy.size>=4)return reply(res,429,{error:'Metrics collection is busy. Try again shortly.'});
+          const command=telemetryCommand();
+          telemetryBusy.set(device.id,(async()=>{
+            const output=await mesh.request('runcommands',{nodeids:[device.id],type:2,cmds:command.script,reply:true,runAsUser:0},{output:true});
+            const result={...parseTelemetry(output.result,command.marker),nodeId:device.id,checkedAt:new Date().toISOString()};telemetryCache.set(device.id,result);return result;
+          })().finally(()=>telemetryBusy.delete(device.id)));
+        }
+        return reply(res,200,await telemetryBusy.get(device.id));
+      }
       if(req.method==='POST' && ['/api/device-update','/api/device-delete'].includes(url.pathname)){
         const input=await body(req);await synchronize();
         if(snapshot.error)return reply(res,502,{error:snapshot.error});

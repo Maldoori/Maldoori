@@ -35,7 +35,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
         const marker=input.cmds.match(/MALDOORI_[a-f0-9]{24}/)[0];
         if(input.cmds.includes('Stop-Service'))mockServices[0].State='Stopped';
         if(input.cmds.includes('Start-Service')||input.cmds.includes('Restart-Service'))mockServices[0].State='Running';
-        output={action:'msg',type:'runcommands',responseid:input.responseid,result:marker+JSON.stringify(commandFailure?{ok:false}:{ok:true,services:mockServices})+marker};
+        output={action:'msg',type:'runcommands',responseid:input.responseid,result:marker+JSON.stringify(commandFailure?{ok:false}:(input.cmds.includes('Win32_Processor')?{ok:true,cpu:42,memoryTotal:16000,memoryFree:4000,diskTotal:100000,diskFree:45000,diskName:'C:'}:{ok:true,services:mockServices}))+marker};
       }
       socket.send(JSON.stringify(output));
     });
@@ -100,6 +100,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   result=await api('inventory');const branchDevice=result.data.devices.find(d=>d.id==='node//branch-server');
   assert.equal(branchDevice.company,'New company');assert.equal(branchDevice.location,'Branch office');assert.equal(branchDevice.groupName,'Servers');
   assert.equal((await api('invitation',{groupId:serverGroup})).status,200);
+  result=await api('telemetry',{nodeId:'node//original-device'});assert.equal(result.status,200);assert.equal(result.data.cpu,42);assert.equal(result.data.memory,75);assert.equal(result.data.disk,55);
   result=await api('services',{nodeId:'node//original-device'});assert.equal(result.status,200);assert.equal(result.data.services.length,2);assert.equal(result.data.services.find(s=>s.name==='RpcSs').protected,true);
   assert.equal((await api('service-action',{nodeId:'node//original-device',action:'stop',name:'RpcSs'})).status,403);
   assert.equal((await api('service-action',{nodeId:'node//original-device',action:'stop',name:"Spooler';Remove-Item C:"})).status,400);
@@ -135,6 +136,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('[name="password"]').fill('test-rmm-password-long');
       await page.locator('#login-form button').click();
       await page.locator('#devices').getByText('REAL-WINDOWS',{exact:true}).waitFor();
+      await page.locator('.device-card').filter({has:page.getByText('REAL-WINDOWS',{exact:true})}).locator('[data-metric-value="cpu"]').getByText('42%',{exact:true}).waitFor();
       assert.equal(await page.locator('[data-remote]').count(),3);assert.equal(await page.locator('[data-remote]:enabled').count(),1);
       await page.locator('[data-page="backups"]').click();
       await page.locator('#acronis-connect').click();
