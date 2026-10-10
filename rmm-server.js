@@ -150,7 +150,7 @@ const server = http.createServer(async (req, res) => {
           if(telemetryBusy.size>=4)return reply(res,429,{error:'Metrics collection is busy. Try again shortly.'});
           const command=telemetryCommand();
           telemetryBusy.set(device.id,(async()=>{
-            const output=await mesh.request('runcommands',{nodeids:[device.id],type:2,cmds:command.script,reply:true,runAsUser:0},{output:true});
+            const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,telemetry:true});
             const result={...parseTelemetry(output.result,command.marker),nodeId:device.id,checkedAt:new Date().toISOString()};telemetryCache.set(device.id,result);return result;
           })().finally(()=>telemetryBusy.delete(device.id)));
         }

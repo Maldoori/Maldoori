@@ -31,11 +31,12 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       if(input.action==='createInviteLink') output.url=`https://localhost:${upstream.address().port}/agentinvite?c=test-invitation&group=${encodeURIComponent(input.meshid)}`;
       if(input.action==='runcommands'){
         if(permissionFailure){socket.send(JSON.stringify({...output,result:'Access denied'}));return;}
-        assert.equal(input.reply,true);assert.equal(input.type,2);assert.equal(input.runAsUser,0);assert.equal(input.nodeids.length,1);
-        const marker=input.cmds.match(/MALDOORI_[a-f0-9]{24}/)[0];
-        if(input.cmds.includes('Stop-Service'))mockServices[0].State='Stopped';
-        if(input.cmds.includes('Start-Service')||input.cmds.includes('Restart-Service'))mockServices[0].State='Running';
-        output={action:'msg',type:'runcommands',responseid:input.responseid,result:marker+JSON.stringify(commandFailure?{ok:false}:(input.cmds.includes('Win32_Processor')?{ok:true,cpu:42,memoryTotal:16000,memoryFree:4000,diskTotal:100000,diskFree:45000,diskName:'C:'}:{ok:true,services:mockServices}))+marker};
+        const commandScript=input.type===1?Buffer.from(input.cmds.split(' ').at(-1),'base64').toString('utf16le'):input.cmds;
+        assert.equal(input.reply,true);assert.equal(input.type,commandScript.includes('Win32_Processor')?1:2);assert.equal(input.runAsUser,0);assert.equal(input.nodeids.length,1);
+        const marker=commandScript.match(/MALDOORI_[a-f0-9]{24}/)[0];
+        if(commandScript.includes('Stop-Service'))mockServices[0].State='Stopped';
+        if(commandScript.includes('Start-Service')||commandScript.includes('Restart-Service'))mockServices[0].State='Running';
+        output={action:'msg',type:'runcommands',responseid:input.responseid,result:marker+JSON.stringify(commandFailure?{ok:false}:(commandScript.includes('Win32_Processor')?{ok:true,cpu:42,memoryTotal:16000,memoryFree:4000,diskTotal:100000,diskFree:45000,diskName:'C:'}:{ok:true,services:mockServices}))+marker};
       }
       socket.send(JSON.stringify(output));
     });
