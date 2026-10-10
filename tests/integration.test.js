@@ -73,6 +73,8 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('login',{username:'test-admin',password:'test-rmm-password-long'},'https://evil.example')).status,403);
   assert.equal((await api('login',{username:'test-admin',password:'wrong'})).status,401);
   assert.equal((await api('login',{username:'test-admin',password:'test-rmm-password-long'})).status,200);
+  assert.equal((await api('acronis')).data.configured,false);
+  const unavailable=await api('acronis-connect',{});assert.equal(unavailable.status,502);assert.equal(unavailable.data.authenticated,false);assert.equal(unavailable.data.backupStatusVerified,false);
   let result=await api('inventory'); assert.equal(result.data.devices[0].name,'REAL-WINDOWS');
   assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('node'),'original-device');
   assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('viewmode'),'11');
@@ -134,6 +136,11 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('#login-form button').click();
       await page.locator('#devices').getByText('REAL-WINDOWS',{exact:true}).waitFor();
       assert.equal(await page.locator('[data-remote]').count(),1);
+      await page.locator('[data-page="backups"]').click();
+      await page.locator('#acronis-connect').click();
+      await page.waitForFunction(()=>document.querySelector('#acronis-status').textContent.includes('not configured'));
+      assert.equal(await page.locator('#acronis-console').isVisible(),false);
+      await page.locator('[data-page="overview"]').click();
       await page.locator('[data-invite]').first().click();
       await page.locator('#add-device-form .primary').click();
       await page.getByRole('heading',{name:'Enroll a Windows computer'}).waitFor();

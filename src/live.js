@@ -20,6 +20,8 @@ function changePage(value) {
   document.querySelectorAll('[data-page]').forEach(b=>{b.classList.toggle('active',b.dataset.page===page);b.setAttribute('aria-current',b.dataset.page===page?'page':'false');});
   $('#companies-panel').hidden=!['overview','companies'].includes(page);
   $('#devices-panel').hidden=!['overview','devices'].includes(page);
+  $('#backups-panel').hidden=page!=='backups';
+  if(page==='backups')loadAcronis();
   $('#groups-panel').hidden=page!=='groups';$('#services-panel').hidden=page!=='services';
 }
 function render() {
@@ -103,6 +105,13 @@ async function viewServices(nodeId){
   }
   $('#service-search').oninput=rows;$('#refresh-services').onclick=()=>run();await run();
 }
+function renderAcronis(value){
+  $('#acronis-status').textContent=value.error||(!value.configured?'Acronis credentials have not been configured on the server.':value.authenticated?'API authentication verified at '+new Date(value.checkedAt).toLocaleString()+'. Backup results are not yet verified.':'Credentials configured. Test the API connection.');
+  $('#acronis-console').hidden=!value.authenticated;
+  if(value.authenticated)$('#acronis-console').href=value.consoleUrl;
+}
+async function loadAcronis(){try{renderAcronis(await api('acronis'));}catch(error){$('#acronis-status').textContent=error.message;}}
+$('#acronis-connect').onclick=async()=>{const b=$('#acronis-connect');b.disabled=true;$('#acronis-status').textContent='Checking Acronis authentication…';try{renderAcronis(await api('acronis-connect',{}));}catch(error){$('#acronis-console').hidden=true;$('#acronis-status').textContent=error.message;}finally{b.disabled=false;}};
 $('#modal').addEventListener('close',()=>$('#modal').classList.remove('wide'));
 $('#login-form').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{await api('login',Object.fromEntries(new FormData(e.target)));e.target.reset();message('');await refresh();}catch(error){message(error.message);}finally{b.disabled=false;}};
 $('#logout').onclick=async()=>{try{await api('logout',{});$('#modal').close();$('#workspace').hidden=true;$('#logout').hidden=true;$('#login').hidden=false;}catch(error){message(error.message);}};

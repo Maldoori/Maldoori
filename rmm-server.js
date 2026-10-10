@@ -3,6 +3,7 @@ import { readFile, mkdir, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import {AcronisClient} from './lib/acronis.js';
 import { MeshClient } from './lib/mesh.js';
 import {initializeCatalog,ensureDefaultGroup,catalog,addLocation} from './lib/catalog.js';
 import {serviceCommand,parseServiceOutput} from './lib/services.js';
@@ -23,6 +24,8 @@ const username = setting('RMM_USERNAME') || 'admin';
 if (typeof setting('RMM_PASSWORD') !== 'string' || setting('RMM_PASSWORD').length < 16) throw new Error('Set RMM_PASSWORD to a unique password of at least 16 characters.');
 const salt = randomBytes(32), passwordHash = scryptSync(setting('RMM_PASSWORD'), salt, 64);
 const mesh = new MeshClient({ url: setting('MESH_URL'), username: setting('MESH_USERNAME'), password: setting('MESH_PASSWORD') });
+const acronis=new AcronisClient({url:setting('ACRONIS_URL'),clientId:setting('ACRONIS_CLIENT_ID'),secret:setting('ACRONIS_CLIENT_SECRET')});
+let acronisConnection={configured:acronis.configured,authenticated:false,backupStatusVerified:false};
 const dataDir = resolve(process.env.DATA_DIR || resolve(root, 'data'));
 await mkdir(dataDir, { recursive: true, mode: 0o700 });
 const db = new DatabaseSync(resolve(dataDir, 'rmm.sqlite'));
@@ -112,6 +115,11 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/api/logout') { sessions.delete(current.id); res.setHeader('Set-Cookie', cookie('', 0)); return reply(res, 200, { ok: true }); }
       if (req.method === 'GET' && url.pathname === '/api/inventory') return reply(res, 200, { ...snapshot, ...catalog(db) });
       if (req.method === 'POST' && url.pathname === '/api/sync') { await synchronize(); return reply(res, snapshot.error ? 502 : 200, snapshot.error ? { error: snapshot.error } : { ok:true }); }
+      if(req.method==='GET' && url.pathname==='/api/acronis')return reply(res,200,acronisConnection);
+      if(req.method==='POST' && url.pathname==='/api/acronis-connect'){
+        try{acronisConnection=await acronis.testConnection();audit('acronis-connection-tested','acronis');return reply(res,200,acronisConnection);}
+        catch(error){acronisConnection={configured:acronis.configured,authenticated:false,backupStatusVerified:false,error:error.message};return reply(res,502,acronisConnection);}
+      }
       if(req.method==='POST' && url.pathname==='/api/customers'){
         const input=await body(req),name=typeof input.name==='string'?input.name.trim():'';
         if(!name||name.length>120)return reply(res,400,{error:'Enter a customer name of 1–120 characters.'});

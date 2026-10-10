@@ -54,3 +54,9 @@ On the reviewed MeshCentral 1.1.59 installation at `/opt/meshcentral`, run `sudo
 The main hierarchy is Customer → Company → Computer. Use Add customer, then Add company and select that customer. A customer can have multiple companies. Edit company assigns existing companies to a customer without moving or reinstalling their agents. Existing companies initially appear under Unassigned customer. These are organization records within the operator workspace, not customer login accounts.
 
 Add device selects the company and defaults to Main office / Default devices. Expand Advanced only when choosing another location or group. Installed computers display their agent-reported names beneath their company and appear automatically after enrollment.
+
+### Acronis connection (initial integration)
+
+The Backups tab tests OAuth client-credentials authentication against the configured Acronis data center and links to its console. Credentials and access tokens remain server-side, TLS verification is enabled, redirects are rejected, and failed authentication never reveals provider response bodies. This initial connection does not retrieve per-device backup results, execute backups, schedule plans, or restore data. Those operations remain in Acronis until tenant/device mapping and the relevant APIs have been verified with the account. Authentication alone does not establish successful protection.
+
+On the Droplet, run `sudo python3 scripts/configure-acronis.py` to enter a replacement API client ID and secret through hidden prompts. It updates `/etc/maldoori/credentials.json` atomically with mode 600 and preserves existing MeshCentral and RMM settings. Restart `maldoori`, open Backups, and test the connection. Revoke any API credentials previously disclosed in chat. Never commit secrets or include them in shell arguments.
