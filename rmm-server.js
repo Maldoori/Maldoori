@@ -31,6 +31,7 @@ await mkdir(dataDir, { recursive: true, mode: 0o700 });
 const db = new DatabaseSync(resolve(dataDir, 'rmm.sqlite'));
 db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS companies (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL);');
 initializeCatalog(db);
+db.exec('CREATE TABLE IF NOT EXISTS known_devices(id TEXT PRIMARY KEY, group_id TEXT NOT NULL, details TEXT NOT NULL)');
 const serviceBusy = new Set();
 let companyBusy = false;
 const sessions = new Map(), attempts = new Map();
@@ -61,6 +62,24 @@ function synchronize() {
           online: Boolean((n.conn || 0) & 1), desktopUrl: mesh.desktopUrl(n._id)
         }));
       });
+      // Keep discovered computers even when a successful inventory omits them.
+      // Only expose retained records from groups the integration can still access.
+      const seen=new Set(devices.map(d=>d.id));
+      db.exec('BEGIN');
+      try{
+        const save=db.prepare('INSERT INTO known_devices(id,group_id,details) VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET group_id=excluded.group_id,details=excluded.details');
+        for(const device of devices)save.run(device.id,device.groupId,JSON.stringify(device));
+        db.exec('COMMIT');
+      }catch(error){db.exec('ROLLBACK');throw error;}
+      for(const record of db.prepare('SELECT * FROM known_devices').all()){
+        if(seen.has(record.id)||!groupMap.has(record.group_id))continue;
+        const previous=JSON.parse(record.details),assignment=companyMap.get(record.group_id);
+        devices.push({...previous,online:false,retained:true,
+          company:assignment?.company||groupMap.get(record.group_id).name||'Unmapped group',
+          companyId:assignment?.company_id||null,locationId:assignment?.location_id||null,
+          location:assignment?.location||'Unassigned',groupName:assignment?.name||groupMap.get(record.group_id).name,
+          mapped:Boolean(assignment)});
+      }
       snapshot = { groups: groups.meshes.map(g => ({ id: g._id, name: g.name, type: g.mtype })), devices, lastSync: new Date().toISOString(), error: null };
     } catch (error) { snapshot.error = error.message; }
   })().finally(() => syncing = null);

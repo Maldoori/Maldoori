@@ -117,13 +117,13 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   devices[companyId]=[{_id:'node//new-enrolled-device',name:'NEW-PC',conn:1}];
   await api('sync',{});result=await api('inventory');
   assert.equal(result.data.devices.find(d=>d.name==='NEW-PC').company,'New company');
-  assert.equal(result.data.devices.length,2);
+  assert.equal(result.data.devices.length,3);
   devices[companyId][0].conn=0;await api('sync',{});result=await api('inventory');assert.equal(result.data.devices.find(d=>d.name==='NEW-PC').online,false);
-  fail=true;assert.equal((await api('sync',{})).status,502);result=await api('inventory');assert.ok(result.data.error);assert.equal(result.data.devices.length,2);fail=false;
-  devices[companyId]=[];await api('sync',{});result=await api('inventory');assert.equal(result.data.devices.length,1);
+  fail=true;assert.equal((await api('sync',{})).status,502);result=await api('inventory');assert.ok(result.data.error);assert.equal(result.data.devices.length,3);fail=false;
+  devices[companyId]=[];await api('sync',{});result=await api('inventory');assert.equal(result.data.devices.length,3);assert.equal(result.data.devices.find(d=>d.name==='NEW-PC').online,false);
   const raw=JSON.stringify(result.data);assert.ok(!raw.includes('test-mesh-password'));assert.ok(!raw.includes('test-rmm-password'));
   await stop();await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
-  assert.equal((await api('inventory')).data.companies.length,2);
+  const restored=(await api('inventory')).data;assert.equal(restored.companies.length,2);assert.equal(restored.devices.find(d=>d.name==='NEW-PC').online,false);assert.equal(restored.devices.length,3);
   if (process.env.BROWSER_TEST_MODULE) {
     const {chromium}=await import(process.env.BROWSER_TEST_MODULE);
     const browser=await chromium.launch({executablePath:'/usr/bin/chromium',args:['--no-sandbox']});
@@ -135,7 +135,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('[name="password"]').fill('test-rmm-password-long');
       await page.locator('#login-form button').click();
       await page.locator('#devices').getByText('REAL-WINDOWS',{exact:true}).waitFor();
-      assert.equal(await page.locator('[data-remote]').count(),1);
+      assert.equal(await page.locator('[data-remote]').count(),3);assert.equal(await page.locator('[data-remote]:enabled').count(),1);
       await page.locator('[data-page="backups"]').click();
       await page.locator('#acronis-connect').click();
       await page.waitForFunction(()=>document.querySelector('#acronis-status').textContent.includes('not configured'));
