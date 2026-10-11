@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import assert from 'node:assert/strict';
 import https from 'node:https';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -104,6 +105,11 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   for(const consoleUrl of ['http://comet.example','https://user:secret@comet.example','https://comet.example/?token=private','javascript:alert(1)'])assert.equal((await api('comet-settings',{consoleUrl})).status,400);
   assert.equal((await api('comet-settings',{consoleUrl:'https://comet.example/'})).status,200);
   assert.equal((await api('backup-providers')).data.comet.apiConnected,false);
+  assert.equal((await api('backup-provider',{companyId,provider:'msp360'})).status,200);
+  assert.equal((await api('msp360-settings',{consoleUrl:'http://msp360.example/'})).status,400);
+  assert.equal((await api('msp360-settings',{consoleUrl:'https://msp360.example/'})).status,200);
+  assert.equal((await api('backup-providers')).data.msp360.apiConnected,false);
+  assert.equal((await api('backup-provider',{companyId,provider:'comet'})).status,200);
   result=await api('inventory');assert.equal(result.data.companies.filter(c=>c.customer_id===customerId).length,2);assert.equal(result.data.companies[0].customer,'Small business customer');assert.equal(result.data.locations.length,2);assert.equal(result.data.deviceGroups.length,2);
   result=await api('locations',{companyId,name:'Branch office'});assert.equal(result.status,201);const branchId=result.data.id;
   assert.equal((await api('locations',{companyId,name:'Branch office'})).status,409);
@@ -138,7 +144,15 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   fail=true;assert.equal((await api('sync',{})).status,502);result=await api('inventory');assert.ok(result.data.error);assert.equal(result.data.devices.length,3);fail=false;
   devices[companyId]=[];await api('sync',{});result=await api('inventory');assert.equal(result.data.devices.length,3);assert.equal(result.data.devices.find(d=>d.name==='NEW-PC').online,false);
   const raw=JSON.stringify(result.data);assert.ok(!raw.includes('test-mesh-password'));assert.ok(!raw.includes('test-rmm-password'));
-  await stop();await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
+  await stop();
+  const legacyDb=new DatabaseSync(resolve(dir,'data/rmm.sqlite'));
+  legacyDb.exec("BEGIN; CREATE TABLE backup_preferences_old(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('acronis','comet'))); INSERT INTO backup_preferences_old SELECT * FROM backup_preferences; DROP TABLE backup_preferences; ALTER TABLE backup_preferences_old RENAME TO backup_preferences; COMMIT;");legacyDb.close();
+  await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
+  assert.equal((await api('backup-providers')).data.msp360.consoleUrl,'https://msp360.example/');
+  assert.equal((await api('backup-provider',{companyId,provider:'msp360'})).status,200);
+  assert.equal((await api('backup-providers')).data.preferences.find(p=>p.company_id===companyId).provider,'msp360');
+  assert.equal((await api('backup-provider',{companyId,provider:'comet'})).status,200);
+
   const restored=(await api('inventory')).data;assert.equal(restored.companies.length,2);assert.equal(restored.devices.find(d=>d.name==='NEW-PC').online,false);assert.equal(restored.devices.length,3);
   if (process.env.BROWSER_TEST_MODULE) {
     const {chromium}=await import(process.env.BROWSER_TEST_MODULE);
@@ -172,6 +186,20 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('#provider-choice-form select[name="companyId"]').selectOption(companyId);
       assert.equal(await page.locator('#provider-choice-form select[name="provider"]').inputValue(),'comet');
       await page.locator('#provider-choice-form [data-close]').click();
+      await page.locator('#backup-provider-view').selectOption('msp360');
+      await page.locator('#msp360-panel').waitFor({state:'visible'});
+      assert.equal(await page.locator('#comet-panel').isVisible(),false);
+      assert.equal(await page.locator('#msp360-console').getAttribute('href'),'https://msp360.example/');
+      await page.locator('#choose-backup-provider').click();
+      await page.locator('#provider-choice-form select[name="companyId"]').selectOption(companyId);
+      await page.locator('#provider-choice-form select[name="provider"]').selectOption('msp360');
+      await page.locator('#provider-choice-form button.primary').click();
+      await page.locator('#msp360-companies').getByText('New company',{exact:true}).waitFor();
+      await page.locator('#choose-backup-provider').click();
+      await page.locator('#provider-choice-form select[name="companyId"]').selectOption(companyId);
+      await page.locator('#provider-choice-form select[name="provider"]').selectOption('comet');
+      await page.locator('#provider-choice-form button.primary').click();
+      await page.locator('#comet-companies').getByText('New company',{exact:true}).waitFor({state:'attached'});
       await page.locator('#backup-provider-view').selectOption('acronis');
       await page.locator('[data-page="overview"]').click();
       await page.goBack();await page.locator('#backups-panel').waitFor({state:'visible'});

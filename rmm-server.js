@@ -36,7 +36,11 @@ db.exec('CREATE TABLE IF NOT EXISTS known_devices(id TEXT PRIMARY KEY, group_id 
 db.exec('CREATE TABLE IF NOT EXISTS device_preferences(id TEXT PRIMARY KEY,name TEXT,hidden INTEGER NOT NULL DEFAULT 0)');
 const telemetryCache=new Map(),telemetryBusy=new Map();
 db.exec('CREATE TABLE IF NOT EXISTS acronis_links(node_id TEXT PRIMARY KEY,resource_id TEXT NOT NULL UNIQUE,tenant_id TEXT NOT NULL)');
-db.exec("CREATE TABLE IF NOT EXISTS backup_preferences(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('acronis','comet'))); CREATE TABLE IF NOT EXISTS backup_settings(id TEXT PRIMARY KEY,value TEXT NOT NULL)");
+db.exec("CREATE TABLE IF NOT EXISTS backup_preferences(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('acronis','comet','msp360'))); CREATE TABLE IF NOT EXISTS backup_settings(id TEXT PRIMARY KEY,value TEXT NOT NULL)");
+// Extend the provider constraint without losing saved company selections.
+if(!db.prepare("SELECT sql FROM sqlite_master WHERE name='backup_preferences'").get().sql.includes("'msp360'")){
+  db.exec("BEGIN; CREATE TABLE backup_preferences_next(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('acronis','comet','msp360'))); INSERT INTO backup_preferences_next SELECT * FROM backup_preferences; DROP TABLE backup_preferences; ALTER TABLE backup_preferences_next RENAME TO backup_preferences; COMMIT;");
+}
 let acronisInventory={resources:[],tasks:[],backupResults:[],checkedAt:null,error:null},acronisSync;
 function syncAcronis(){
   if(acronisSync)return acronisSync;
@@ -181,19 +185,19 @@ const server = http.createServer(async (req, res) => {
         }
         await synchronize();return reply(res,200,{ok:true});
       }
-      if(req.method==='GET' && url.pathname==='/api/backup-providers')return reply(res,200,{preferences:db.prepare('SELECT * FROM backup_preferences').all(),comet:{consoleUrl:db.prepare("SELECT value FROM backup_settings WHERE id='comet_console'").get()?.value||null,apiConnected:false}});
+      if(req.method==='GET' && url.pathname==='/api/backup-providers')return reply(res,200,{preferences:db.prepare('SELECT * FROM backup_preferences').all(),comet:{consoleUrl:db.prepare("SELECT value FROM backup_settings WHERE id='comet_console'").get()?.value||null,apiConnected:false},msp360:{consoleUrl:db.prepare("SELECT value FROM backup_settings WHERE id='msp360_console'").get()?.value||null,apiConnected:false}});
       if(req.method==='POST' && url.pathname==='/api/backup-provider'){
         const input=await body(req);
         if(!db.prepare('SELECT id FROM companies WHERE id=?').get(input.companyId||''))return reply(res,404,{error:'Company not found.'});
-        if(!['acronis','comet'].includes(input.provider))return reply(res,400,{error:'Choose Acronis or Comet Backup.'});
+        if(!['acronis','comet','msp360'].includes(input.provider))return reply(res,400,{error:'Choose Acronis, Comet Backup, or MSP360.'});
         db.prepare('INSERT INTO backup_preferences(company_id,provider) VALUES (?,?) ON CONFLICT(company_id) DO UPDATE SET provider=excluded.provider').run(input.companyId,input.provider);
         audit('backup-provider-selected',input.companyId);return reply(res,200,{ok:true});
       }
-      if(req.method==='POST' && url.pathname==='/api/comet-settings'){
-        const input=await body(req);let consoleUrl='';
-        if(input.consoleUrl){try{const value=new URL(input.consoleUrl);if(value.protocol!=='https:'||value.username||value.password||value.search||value.hash)throw new Error();consoleUrl=value.href;}catch{return reply(res,400,{error:'Enter an HTTPS Comet console URL without credentials, query parameters, or fragments.'});}}
-        db.prepare("INSERT INTO backup_settings(id,value) VALUES ('comet_console',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value").run(consoleUrl);
-        audit('comet-console-configured','comet');return reply(res,200,{ok:true});
+      if(req.method==='POST' && ['/api/comet-settings','/api/msp360-settings'].includes(url.pathname)){
+        const input=await body(req);const provider=url.pathname==='/api/comet-settings'?'comet':'msp360';let consoleUrl='';
+        if(input.consoleUrl){try{const value=new URL(input.consoleUrl);if(value.protocol!=='https:'||value.username||value.password||value.search||value.hash)throw new Error();consoleUrl=value.href;}catch{return reply(res,400,{error:'Enter an HTTPS backup console URL without credentials, query parameters, or fragments.'});}}
+        db.prepare("INSERT INTO backup_settings(id,value) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value").run(provider+'_console',consoleUrl);
+        audit(provider+'-console-configured',provider);return reply(res,200,{ok:true});
       }
       if(req.method==='GET' && url.pathname==='/api/acronis-inventory'){
         if(acronis.configured&&(!acronisInventory.checkedAt||Date.now()-Date.parse(acronisInventory.checkedAt)>60000))await syncAcronis();

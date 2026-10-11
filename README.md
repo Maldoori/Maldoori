@@ -81,6 +81,8 @@ Dashboard (formerly Overview) includes a Customize dashboard dialog for showing/
 
 ### Backup provider choices
 
-Backups offers Acronis and Comet Backup. Use **Choose provider for a company** to save each company’s preference in SQLite; existing companies default to Acronis and existing Acronis links remain intact. This is an operator-managed preference in the current single-operator workspace, not a customer login portal. Choosing a provider does not install agents, migrate backups, or change subscriptions.
+Backups offers Acronis, Comet Backup, and MSP360. Use **Choose provider for a company** to save each company’s preference in SQLite; existing companies default to Acronis and existing Acronis links remain intact. This is an operator-managed preference in the current single-operator workspace, not a customer login portal. Choosing a provider does not install agents, migrate backups, or change subscriptions.
 
 The Comet panel saves an HTTPS management console link and lists companies that chose Comet. It does not store API credentials or claim a successful backup. Comet API synchronization, agent deployment, scheduling, and backup/recovery controls require a subsequent integration with a configured Comet account. Run those operations in the Comet console for now. Acronis status integration remains available independently of the selected company preference. Back up the SQLite database before deploying the new tables.
+
+MSP360 has its own panel and HTTPS management console link, independent of Comet. Company selections and both console links persist across restarts. The two-provider database schema upgrades automatically while preserving existing choices. MSP360 API synchronization, deployment, and backup/recovery controls are not connected yet; use its management console for those operations.
