@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {telemetryCommand,parseTelemetry} from './lib/telemetry.js';
 import {AcronisClient} from './lib/acronis.js';
 import { MeshClient } from './lib/mesh.js';
-import {initializeCatalog,ensureDefaultGroup,catalog,addLocation} from './lib/catalog.js';
+import {initializeCatalog,ensureDefaultGroup,catalog,addLocation,contactDetails} from './lib/catalog.js';
 import {serviceCommand,parseServiceOutput} from './lib/services.js';
 
 const root = import.meta.dirname;
@@ -346,11 +346,34 @@ const server = http.createServer(async (req, res) => {
         try{acronisConnection=await acronis.testConnection();audit('acronis-connection-tested','acronis');return reply(res,200,acronisConnection);}
         catch(error){acronisConnection={configured:acronis.configured,authenticated:false,backupStatusVerified:false,error:error.message};return reply(res,502,acronisConnection);}
       }
+      if(req.method==='POST' && url.pathname==='/api/customer-update'){
+        const input=await body(req),customer=db.prepare('SELECT * FROM customers WHERE id=?').get(input.id||'');if(!customer)return reply(res,404,{error:'Customer not found.'});
+        const name=typeof input.name==='string'?input.name.trim():'';if(!name||name.length>120)return reply(res,400,{error:'Enter a customer name of 1–120 characters.'});
+        if(db.prepare('SELECT id FROM customers WHERE name=? AND id<>?').get(name,input.id))return reply(res,409,{error:'Customer name is already in use.'});
+        const details=contactDetails(input,customer);db.prepare('UPDATE customers SET name=?,contact=?,email=?,phone=?,plan=? WHERE id=?').run(name,details.contact,details.email,details.phone,details.plan,input.id);audit('customer-updated',input.id);return reply(res,200,{ok:true});
+      }
+      if(req.method==='POST' && ['/api/customer-delete','/api/company-delete'].includes(url.pathname)){
+        const input=await body(req);if(input.confirm!==true||typeof input.id!=='string')return reply(res,400,{error:'Confirm deletion of this empty record.'});
+        if(url.pathname==='/api/customer-delete'){
+          if(!db.prepare('SELECT id FROM customers WHERE id=?').get(input.id))return reply(res,404,{error:'Customer not found.'});
+          if(db.prepare('SELECT id FROM companies WHERE customer_id=?').get(input.id))return reply(res,409,{error:'This customer has linked companies. Reassign those companies before deleting the customer.'});
+          db.prepare('DELETE FROM customers WHERE id=?').run(input.id);audit('customer-deleted',input.id);return reply(res,200,{ok:true});
+        }
+        if(companyBusy)return reply(res,409,{error:'Another company update is in progress.'});
+        companyBusy=true;try{
+          if(!db.prepare('SELECT id FROM companies WHERE id=?').get(input.id))return reply(res,404,{error:'Company not found.'});
+          await synchronize();if(snapshot.error)return reply(res,502,{error:snapshot.error});
+          const groups=db.prepare('SELECT id FROM device_groups WHERE company_id=?').all(input.id);
+          if(groups.some(g=>db.prepare('SELECT id FROM known_devices WHERE group_id=?').get(g.id)))return reply(res,409,{error:'This company has computer records. Companies with computers cannot be deleted.'});
+          db.exec('BEGIN');try{db.prepare('DELETE FROM device_groups WHERE company_id=?').run(input.id);db.prepare('DELETE FROM locations WHERE company_id=?').run(input.id);db.prepare('DELETE FROM companies WHERE id=?').run(input.id);db.exec('COMMIT');}catch{db.exec('ROLLBACK');return reply(res,409,{error:'This company has saved settings or history. Keep this company to preserve those records.'});}
+          audit('company-deleted',input.id);await synchronize();return reply(res,200,{ok:true});
+        }finally{companyBusy=false;}
+      }
       if(req.method==='POST' && url.pathname==='/api/customers'){
         const input=await body(req),name=typeof input.name==='string'?input.name.trim():'';
         if(!name||name.length>120)return reply(res,400,{error:'Enter a customer name of 1–120 characters.'});
         if(db.prepare('SELECT id FROM customers WHERE name=?').get(name))return reply(res,409,{error:'That customer already exists.'});
-        const id=randomBytes(16).toString('hex');db.prepare('INSERT INTO customers(id,name) VALUES (?,?)').run(id,name);
+        const details=contactDetails(input),id=randomBytes(16).toString('hex');db.prepare('INSERT INTO customers(id,name,contact,email,phone,plan) VALUES (?,?,?,?,?,?)').run(id,name,details.contact,details.email,details.phone,details.plan);
         audit('customer-created',id);return reply(res,201,{id,name});
       }
       if (req.method === 'POST' && url.pathname === '/api/companies') {
@@ -358,7 +381,7 @@ const server = http.createServer(async (req, res) => {
         const name = typeof input.name === 'string' ? input.name.trim() : '';
         if (!name || name.length > 120) return reply(res, 400, { error: 'Enter a company name of 1–120 characters.' });
         if (companyBusy) return reply(res,409,{error:'Another company update is in progress. Try again after it completes.'});
-        companyBusy = true;
+        const details=contactDetails(input);companyBusy = true;
         try {
         if (db.prepare('SELECT id FROM companies WHERE name=?').get(name)) return reply(res, 409, { error: 'That company already exists.' });
         if(input.customerId&&!db.prepare('SELECT id FROM customers WHERE id=?').get(input.customerId))return reply(res,400,{error:'Customer not found.'});
@@ -372,7 +395,7 @@ const server = http.createServer(async (req, res) => {
           id = result.meshid;
           if (typeof id !== 'string' || !id.startsWith('mesh/')) throw new Error('MeshCentral did not return a group ID. Synchronize before retrying; the group may have been created.');
         }
-        db.prepare('INSERT INTO companies(id,name,customer_id) VALUES (?,?,?)').run(id, name,input.customerId||null);
+        db.prepare('INSERT INTO companies(id,name,customer_id,contact,email,phone,plan) VALUES (?,?,?,?,?,?,?)').run(id,name,input.customerId||null,details.contact,details.email,details.phone,details.plan);
         ensureDefaultGroup(db,{id,name});
         audit('company-linked', id); await synchronize(); return reply(res, 201, { id, name });
         } finally { companyBusy=false; }
@@ -412,6 +435,7 @@ const server = http.createServer(async (req, res) => {
         if(!name||name.length>120) return reply(res,400,{error:'Enter a company name of 1–120 characters.'});
         if(db.prepare('SELECT id FROM companies WHERE name=? AND id<>?').get(name,input.id)) return reply(res,409,{error:'Company name is already in use.'});
         if(input.customerId&&!db.prepare('SELECT id FROM customers WHERE id=?').get(input.customerId))return reply(res,400,{error:'Customer not found.'});
+        const details=contactDetails(input,db.prepare('SELECT * FROM companies WHERE id=?').get(input.id));db.prepare('UPDATE companies SET contact=?,email=?,phone=?,plan=? WHERE id=?').run(details.contact,details.email,details.phone,details.plan,input.id);
         db.prepare('UPDATE companies SET name=?,customer_id=? WHERE id=?').run(name,input.customerId===undefined?db.prepare('SELECT customer_id FROM companies WHERE id=?').get(input.id).customer_id:input.customerId||null,input.id);audit('company-renamed',input.id);await synchronize();return reply(res,200,{ok:true});
       }
       if(req.method==='POST' && ['/api/services','/api/service-action'].includes(url.pathname)){

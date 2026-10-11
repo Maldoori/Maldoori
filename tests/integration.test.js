@@ -165,6 +165,23 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   fail=true;assert.equal((await api('sync',{})).status,502);result=await api('inventory');assert.ok(result.data.error);assert.equal(result.data.devices.length,3);fail=false;
   devices[companyId]=[];await api('sync',{});result=await api('inventory');assert.equal(result.data.devices.length,3);assert.equal(result.data.devices.find(d=>d.name==='NEW-PC').online,false);
   const raw=JSON.stringify(result.data);assert.ok(!raw.includes('test-mesh-password'));assert.ok(!raw.includes('test-rmm-password'));
+  assert.equal((await api('customer-update',{id:customerId,name:'Small business customer',contact:'Mo Abbas',email:'support@skybase.example',phone:'+1 555 0100',plan:'professional'})).status,200);
+  assert.equal((await api('customer-update',{id:customerId,name:'Small business customer',email:'invalid'})).status,400);
+  assert.equal((await api('customer-delete',{id:customerId,confirm:true})).status,409);
+  assert.equal((await api('company-delete',{id:'mesh//existing-group',confirm:true})).status,409);
+  const emptyCompany=(await api('companies',{name:'Disposable company',contact:'Example contact',plan:'basic'})).data.id;
+  assert.equal((await api('security-provider',{companyId:emptyCompany,provider:'defender'})).status,200);
+  assert.equal((await api('company-delete',{id:emptyCompany,confirm:true})).status,409);
+  assert.equal((await api('inventory')).data.deviceGroups.filter(g=>g.company_id===emptyCompany).length,1);
+  assert.equal((await api('company-update',{id:emptyCompany,name:'Disposable company',email:'contact@example.com'})).status,200);
+  assert.equal((await api('inventory')).data.companies.find(c=>c.id===emptyCompany).contact,'Example contact');
+  assert.equal((await api('security-provider',{companyId:emptyCompany,provider:''})).status,200);
+  assert.equal((await api('company-delete',{id:emptyCompany,confirm:true})).status,200);
+  assert.ok((await api('inventory')).data.groups.some(g=>g.id===emptyCompany));
+  const emptyCustomer=(await api('customers',{name:'Disposable customer'})).data.id;
+  assert.equal((await api('customer-delete',{id:emptyCustomer})).status,400);
+  assert.equal((await api('customer-delete',{id:emptyCustomer,confirm:true})).status,200);
+
   await stop();
   const legacyDb=new DatabaseSync(resolve(dir,'data/rmm.sqlite'));
   legacyDb.exec("BEGIN; CREATE TABLE backup_preferences_old(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('acronis','comet'))); INSERT INTO backup_preferences_old SELECT * FROM backup_preferences; DROP TABLE backup_preferences; ALTER TABLE backup_preferences_old RENAME TO backup_preferences; COMMIT;");legacyDb.exec('ALTER TABLE patches DROP COLUMN reference');legacyDb.close();
@@ -174,7 +191,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('backup-providers')).data.preferences.find(p=>p.company_id===companyId).provider,'msp360');
   assert.equal((await api('backup-provider',{companyId,provider:'comet'})).status,200);
 
-  const restored=(await api('inventory')).data;assert.equal(restored.companies.length,2);assert.equal(restored.devices.find(d=>d.name==='NEW-PC').online,false);assert.equal(restored.devices.length,3);
+  const restored=(await api('inventory')).data;assert.equal(restored.customers.find(c=>c.id===customerId).email,'support@skybase.example');assert.equal(restored.companies.length,2);assert.equal(restored.devices.find(d=>d.name==='NEW-PC').online,false);assert.equal(restored.devices.length,3);
   if (process.env.BROWSER_TEST_MODULE) {
     const {chromium}=await import(process.env.BROWSER_TEST_MODULE);
     const browser=await chromium.launch({executablePath:'/usr/bin/chromium',args:['--no-sandbox']});
@@ -330,13 +347,20 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.goBack();await page.locator('#backups-panel').waitFor({state:'visible'});
       await page.goForward();await page.locator('#dashboard-layout').waitFor({state:'visible'});
       await page.locator('[data-page="companies"]').click();
+      await page.locator('#customer-cards').getByText('Mo Abbas',{exact:true}).waitFor();
+      await page.locator('[data-edit-customer="'+customerId+'"]').click();await page.locator('#customer-form [name="phone"]').fill('+1 555 0200');await page.locator('#customer-form .primary').click();
+      await page.locator('#customer-cards').getByText(/555 0200/).waitFor();
+      await page.locator('#organisation-search').fill('no-match-client');assert.equal(await page.locator('#customer-cards .organisation-card').count(),0);await page.locator('#organisation-search').fill('');
+      await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-customers-cards.png',fullPage:true});
+      await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});
+      await page.locator('#companies-tab').click();
       await page.locator('[data-invite]').first().click();
       await page.locator('#add-device-form .primary').click();
       await page.getByRole('heading',{name:'Enroll a Windows computer'}).waitFor();
       assert.match(await page.locator('.invite').getAttribute('href'),/agentinvite/);
       await page.locator('[data-close]').click();
       const companiesBefore=(await api('inventory')).data.companies.length;
-      await page.locator('#add-device').click();
+      await page.locator('#companies [data-invite="'+companyId+'"]').click();
       await page.locator('#add-device-form [name="companyId"]').selectOption(companyId);
       await page.locator('#add-device-form summary').click();
       await page.locator('#add-device-form [name="locationId"]').selectOption({label:'Main office'});
@@ -347,7 +371,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       assert.match(await page.locator('#modal').textContent(),/New company/);
       assert.equal((await api('inventory')).data.companies.length,companiesBefore);
       await page.locator('[data-close]').click();
-      await page.locator('#add-device').click();
+      await page.locator('#companies [data-invite="'+companyId+'"]').click();
       await page.locator('#add-device-form [name="companyId"]').selectOption(companyId);
       await page.locator('#add-device-form summary').click();
       await page.locator('#add-device-form [name="locationId"]').selectOption(branchId);
@@ -356,7 +380,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.getByRole('heading',{name:'Enroll a Windows computer'}).waitFor();
       assert.equal(new URL(await page.locator('.invite').getAttribute('href')).searchParams.get('group'),serverGroup);
       await page.locator('[data-close]').click();
-      await page.locator('#add-company').click();
+      await page.locator('#cards-add-company').click();
       await page.locator('[name="name"]').fill('Browser company');
       await page.locator('#company-form .primary').click();
       await page.locator('#companies').getByText('Browser company',{exact:true}).waitFor();
