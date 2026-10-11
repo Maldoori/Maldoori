@@ -3,6 +3,33 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp
 const pages=new Set(['overview','devices','companies','groups','backups']);
 const pageFromUrl=()=>pages.has(location.hash.slice(1))?location.hash.slice(1):'overview';
 let inventory = {groups:[],customers:[],companies:[],locations:[],deviceGroups:[],devices:[]}, refreshing = false, page = pageFromUrl();
+const dashboardWidgets=[{id:'dashboard-stats',name:'Inventory totals'},{id:'companies-panel',name:'Customers & companies'},{id:'devices-panel',name:'Computer cards and live metrics'},{id:'dashboard-quick',name:'Quick actions'},{id:'backups-panel',name:'Acronis backups'}];
+const defaultDashboard=()=>({columns:1,order:dashboardWidgets.map(w=>w.id),hidden:['backups-panel']});
+function normalizeDashboard(value){if(!value||typeof value!=='object')return defaultDashboard();const ids=dashboardWidgets.map(w=>w.id);return {columns:[1,2,3].includes(value?.columns)?value.columns:1,order:[...new Set([...(Array.isArray(value?.order)?value.order.filter(id=>ids.includes(id)):[]),...ids])],hidden:Array.isArray(value?.hidden)?[...new Set(value.hidden.filter(id=>ids.includes(id)))]:[]};}
+let dashboard=defaultDashboard();try{dashboard=normalizeDashboard(JSON.parse(localStorage.getItem('skybase-dashboard-layout')));}catch{}
+function applyDashboard(){
+  const target=$('#dashboard-layout'),isDashboard=page==='overview';target.hidden=!isDashboard;$('#customize-dashboard').hidden=!isDashboard;
+  target.className='dashboard-layout dashboard-columns-'+dashboard.columns;
+  for(const id of dashboard.order){
+    const widget=$('#'+id);
+    if(isDashboard){target.append(widget);widget.hidden=dashboard.hidden.includes(id);}
+    else{$('#workspace').insertBefore(widget,$('#groups-panel'));widget.hidden=id==='dashboard-quick'||id==='companies-panel'&&page!=='companies'||id==='devices-panel'&&page!=='devices'||id==='backups-panel'&&page!=='backups';}
+  }
+  if(isDashboard&&!dashboard.hidden.includes('backups-panel'))loadAcronis();
+  if(isDashboard&&dashboard.hidden.length===dashboardWidgets.length){target.append($('#dashboard-empty'));$('#dashboard-empty').hidden=false;}else $('#dashboard-empty').hidden=true;
+}
+function customizeDashboard(){
+  let draft=normalizeDashboard(dashboard);
+  function draw(){
+    showDialog(`<h2>Customize dashboard</h2><p class="muted">Choose existing widgets, move them into your preferred order, and select a layout. Settings are saved in this browser.</p><label>Columns<select id="dashboard-columns">${[1,2,3].map(n=>`<option value="${n}" ${n===draft.columns?'selected':''}>${n} column${n===1?'':'s'}</option>`).join('')}</select></label><div>${draft.order.map((id,index)=>`<div class="widget-setting"><label><input type="checkbox" data-widget-toggle="${id}" ${draft.hidden.includes(id)?'':'checked'}>${escape(dashboardWidgets.find(w=>w.id===id).name)}</label><div><button type="button" data-widget-move="${id}" data-direction="-1" aria-label="Move ${escape(dashboardWidgets.find(w=>w.id===id).name)} up" ${index===0?'disabled':''}>↑</button><button type="button" data-widget-move="${id}" data-direction="1" aria-label="Move ${escape(dashboardWidgets.find(w=>w.id===id).name)} down" ${index===draft.order.length-1?'disabled':''}>↓</button></div></div>`).join('')}</div><p id="dashboard-save-error" role="alert"></p><div class="actions"><button id="dashboard-reset" type="button">Reset layout</button><button data-close>Cancel</button><button class="primary" id="dashboard-save">Save layout</button></div>`);
+    $('#dashboard-columns').onchange=e=>draft.columns=Number(e.target.value);
+    document.querySelectorAll('[data-widget-toggle]').forEach(input=>input.onchange=()=>{draft.hidden=input.checked?draft.hidden.filter(id=>id!==input.dataset.widgetToggle):[...draft.hidden,input.dataset.widgetToggle];});
+    bind('[data-widget-move]',b=>{const index=draft.order.indexOf(b.dataset.widgetMove),next=index+Number(b.dataset.direction);[draft.order[index],draft.order[next]]=[draft.order[next],draft.order[index]];$('#modal').close();draw();});
+    $('#dashboard-reset').onclick=()=>{draft=defaultDashboard();$('#modal').close();draw();};
+    $('#dashboard-save').onclick=()=>{try{localStorage.setItem('skybase-dashboard-layout',JSON.stringify(draft));dashboard=normalizeDashboard(draft);$('#modal').close();applyDashboard();}catch{$('#dashboard-save-error').textContent='Your browser blocked saving. Allow site storage and try again.';}};
+  }
+  draw();
+}
 async function api(path, data) {
   const response = await fetch('/api/' + path, {method:data === undefined ? 'GET' : 'POST',headers:data === undefined ? {} : {'Content-Type':'application/json'},body:data === undefined ? undefined : JSON.stringify(data)});
   const value = await response.json();
@@ -26,6 +53,8 @@ function changePage(value,updateUrl=false) {
   $('#backups-panel').hidden=page!=='backups';
   if(page==='backups')loadAcronis();
   $('#groups-panel').hidden=page!=='groups';
+  $('#workspace-title').textContent={overview:'Dashboard',devices:'Computers',companies:'Customers & companies',groups:'Device groups',backups:'Backups'}[page];
+  applyDashboard();
 }
 function render() {
   $('#company-count').textContent=inventory.companies.length;$('#location-count').textContent=inventory.locations.length;
@@ -170,6 +199,7 @@ $('#logout').onclick=async()=>{try{await api('logout',{});$('#modal').close();$(
 $('#sync').onclick=async()=>{$('#sync').disabled=true;try{await api('sync',{});message('');}catch(error){message(error.message);}finally{await refresh();$('#sync').disabled=false;}};
 $('#search').oninput=render;['#company-filter','#location-filter','#group-filter','#status-filter'].forEach(id=>$(id).onchange=render);
 $('#add-customer').onclick=()=>{showDialog(`<h2>Add customer</h2><form id="customer-form"><label>Customer name<input name="name" required maxlength="120" placeholder="Client or customer contact"></label>${actions('Save customer')}</form>`);submitForm('#customer-form','customers');};
+$('#customize-dashboard').onclick=customizeDashboard;$('#quick-device').onclick=()=>enroll();$('#quick-company').onclick=companyForm;$('#quick-backups').onclick=()=>changePage('backups',true);
 $('#add-company').onclick=companyForm;$('#add-device').onclick=()=>enroll($('#company-filter').value,$('#location-filter').value,$('#group-filter').value);$('#add-location').onclick=()=>locationForm();$('#add-group').onclick=()=>groupForm();bind('[data-page]',b=>changePage(b.dataset.page,true));
 window.addEventListener('popstate',()=>changePage(pageFromUrl()));
 window.addEventListener('hashchange',()=>changePage(pageFromUrl()));
