@@ -407,6 +407,23 @@ const server = http.createServer(async (req, res) => {
         if (db.prepare('SELECT id FROM locations WHERE company_id=? AND name=?').get(input.companyId,name)) return reply(res,409,{error:'That location already exists in this company.'});
         const location=addLocation(db,input.companyId,name); audit('location-created',location.id); return reply(res,201,location);
       }
+      if(req.method==='POST' && ['/api/group-update','/api/group-delete'].includes(url.pathname)){
+        const input=await body(req);if(typeof input.id!=='string')return reply(res,400,{error:'Choose a device group.'});
+        if(companyBusy)return reply(res,409,{error:'Another company or group update is in progress.'});companyBusy=true;
+        try{const group=db.prepare('SELECT * FROM device_groups WHERE id=?').get(input.id);if(!group)return reply(res,404,{error:'Device group not found.'});
+          if(url.pathname==='/api/group-update'){
+            const name=typeof input.name==='string'?input.name.trim():'';if(!name||name.length>120)return reply(res,400,{error:'Enter a group name of 1–120 characters.'});
+            if(db.prepare('SELECT id FROM device_groups WHERE company_id=? AND location_id=? AND name=? AND id<>?').get(group.company_id,group.location_id,name,group.id))return reply(res,409,{error:'A group with this name already exists at this location.'});
+            db.prepare('UPDATE device_groups SET name=? WHERE id=?').run(name,group.id);audit('device-group-renamed',group.id);
+          }else{
+            if(input.confirm!==true)return reply(res,400,{error:'Confirm removal of this empty group.'});
+            if(group.id===group.company_id)return reply(res,409,{error:'Default groups are kept for company enrollment.'});
+            await synchronize();if(snapshot.error)return reply(res,502,{error:snapshot.error});
+            if(db.prepare('SELECT id FROM known_devices WHERE group_id=?').get(group.id))return reply(res,409,{error:'This group has computer records, including offline computers. It cannot be deleted.'});
+            db.prepare('DELETE FROM device_groups WHERE id=?').run(group.id);audit('device-group-unlinked',group.id);
+          }await synchronize();return reply(res,200,{ok:true});
+        }finally{companyBusy=false;}
+      }
       if (req.method === 'POST' && url.pathname === '/api/groups') {
         const input=await body(req),name=typeof input.name==='string'?input.name.trim():'';
         const location=db.prepare('SELECT l.*,c.name AS company FROM locations l JOIN companies c ON c.id=l.company_id WHERE l.id=? AND l.company_id=?').get(input.locationId||'',input.companyId||'');

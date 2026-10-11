@@ -142,6 +142,15 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   result=await api('inventory');const branchDevice=result.data.devices.find(d=>d.id==='node//branch-server');
   assert.equal(branchDevice.company,'New company');assert.equal(branchDevice.location,'Branch office');assert.equal(branchDevice.groupName,'Servers');
   assert.equal((await api('invitation',{groupId:serverGroup})).status,200);
+  assert.equal((await api('group-delete',{id:serverGroup,confirm:true})).status,409);
+  assert.equal((await api('group-delete',{id:companyId,confirm:true})).status,409);
+  const disposableGroup=(await api('groups',{companyId,locationId:branchId,name:'Disposable group'})).data.id;
+  assert.equal((await api('group-update',{id:disposableGroup,name:'Servers'})).status,409);
+  assert.equal((await api('group-update',{id:disposableGroup,name:'Temporary group'})).status,200);
+  assert.equal((await api('inventory')).data.deviceGroups.find(g=>g.id===disposableGroup).location_id,branchId);
+  assert.equal((await api('group-delete',{id:disposableGroup})).status,400);
+  assert.equal((await api('group-delete',{id:disposableGroup,confirm:true})).status,200);
+  assert.ok((await api('inventory')).data.groups.some(g=>g.id===disposableGroup));
   result=await api('telemetry',{nodeId:'node//original-device'});assert.equal(result.status,200);assert.equal(result.data.cpu,42);assert.equal(result.data.memory,75);assert.equal(result.data.disk,55);
   result=await api('services',{nodeId:'node//original-device'});assert.equal(result.status,200);assert.equal(result.data.services.length,2);assert.equal(result.data.services.find(s=>s.name==='RpcSs').protected,true);
   assert.equal((await api('service-action',{nodeId:'node//original-device',action:'stop',name:'RpcSs'})).status,403);
@@ -397,6 +406,15 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('#group-form [name="name"]').fill('Laptops');
       await page.locator('#group-form .primary').click();
       await page.locator('#groups').getByText('Laptops',{exact:true}).waitFor();
+      const laptopCard=page.locator('#groups .group-card').filter({has:page.getByText('Laptops',{exact:true})});
+      await laptopCard.locator('[data-edit-device-group]').click();await page.locator('#device-group-edit-form [name="name"]').fill('Mobile computers');await page.locator('#device-group-edit-form .primary').click();
+      await page.locator('#groups').getByText('Mobile computers',{exact:true}).waitFor();
+      await page.locator('#device-group-search').fill('no-such-group');assert.equal(await page.locator('#groups .group-card').count(),0);await page.locator('#device-group-search').fill('');
+      await page.locator('#device-group-company').selectOption(companyId);assert.equal(await page.locator('#groups .group-card').count(),2);await page.locator('#device-group-company').selectOption('');
+      await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-device-group-cards.png',fullPage:true});
+      await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});
+      await page.locator('#groups .group-card').filter({has:page.getByText('Mobile computers',{exact:true})}).locator('[data-remove-device-group]').click();await page.locator('#confirm-group-remove').click();await page.locator('#unassigned-groups').getByText(/Laptops/).waitFor();
+
       await page.locator('[data-page="devices"]').click();
       await page.locator('#search').fill('no-such-device');
       assert.equal(await page.locator('[data-remote]').count(),0);
