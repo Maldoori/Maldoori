@@ -177,6 +177,14 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('#acronis-connect').click();
       await page.waitForFunction(()=>document.querySelector('#acronis-status').textContent.includes('not configured'));
       assert.equal(await page.locator('#acronis-console').isVisible(),false);
+      await page.locator('#schedule-backup').click();
+      await page.locator('#schedule-company').selectOption(companyId);
+      await page.locator('#schedule-provider-guide').getByRole('link',{name:'Open Comet Backup ↗'}).waitFor();
+      assert.equal(await page.locator('#schedule-provider-guide a').getAttribute('href'),'https://comet.example/');
+      await page.locator('#modal [data-close]').click();
+      await page.setViewportSize({width:1560,height:960});
+      await page.screenshot({path:'/tmp/skybase-backup-redesign.png',fullPage:true});
+
       await page.locator('#backup-provider-view').selectOption('comet');
       await page.locator('#comet-panel').waitFor({state:'visible'});
       assert.equal(await page.locator('#acronis-provider-panel').isVisible(),false);
