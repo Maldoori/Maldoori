@@ -3,8 +3,8 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp
 const pages=new Set(['overview','devices','companies','groups','backups']);
 const pageFromUrl=()=>pages.has(location.hash.slice(1))?location.hash.slice(1):'overview';
 let inventory = {groups:[],customers:[],companies:[],locations:[],deviceGroups:[],devices:[]}, refreshing = false, page = pageFromUrl();
-const dashboardWidgets=[{id:'dashboard-stats',name:'Inventory totals'},{id:'companies-panel',name:'Customers & companies'},{id:'devices-panel',name:'Computer cards and live metrics'},{id:'dashboard-quick',name:'Quick actions'},{id:'backups-panel',name:'Acronis backups'}];
-const defaultDashboard=()=>({columns:1,order:dashboardWidgets.map(w=>w.id),hidden:['backups-panel']});
+const dashboardWidgets=[{id:'dashboard-stats',name:'Inventory totals'},{id:'dashboard-endpoints',name:'Endpoint status'},{id:'dashboard-coverage',name:'Protection overview'},{id:'dashboard-alerts',name:'Priority alerts'},{id:'dashboard-inventory',name:'Inventory table'},{id:'dashboard-quick',name:'Quick tools'},{id:'companies-panel',name:'Customers & companies'},{id:'devices-panel',name:'Computer cards and live metrics'},{id:'backups-panel',name:'Acronis backups'}];
+const defaultDashboard=()=>({columns:3,order:dashboardWidgets.map(w=>w.id),hidden:['companies-panel','devices-panel','backups-panel']});
 function normalizeDashboard(value){if(!value||typeof value!=='object')return defaultDashboard();const ids=dashboardWidgets.map(w=>w.id);return {columns:[1,2,3].includes(value?.columns)?value.columns:1,order:[...new Set([...(Array.isArray(value?.order)?value.order.filter(id=>ids.includes(id)):[]),...ids])],hidden:Array.isArray(value?.hidden)?[...new Set(value.hidden.filter(id=>ids.includes(id)))]:[]};}
 let dashboard=defaultDashboard();try{dashboard=normalizeDashboard(JSON.parse(localStorage.getItem('skybase-dashboard-layout')));}catch{}
 function applyDashboard(){
@@ -13,7 +13,7 @@ function applyDashboard(){
   for(const id of dashboard.order){
     const widget=$('#'+id);
     if(isDashboard){target.append(widget);widget.hidden=dashboard.hidden.includes(id);}
-    else{$('#workspace').insertBefore(widget,$('#groups-panel'));widget.hidden=id==='dashboard-quick'||id==='companies-panel'&&page!=='companies'||id==='devices-panel'&&page!=='devices'||id==='backups-panel'&&page!=='backups';}
+    else{$('#workspace').insertBefore(widget,$('#groups-panel'));widget.hidden=id.startsWith('dashboard-')&&id!=='dashboard-stats'||id==='companies-panel'&&page!=='companies'||id==='devices-panel'&&page!=='devices'||id==='backups-panel'&&page!=='backups';}
   }
   if(isDashboard&&!dashboard.hidden.includes('backups-panel'))loadAcronis();
   if(isDashboard&&dashboard.hidden.length===dashboardWidgets.length){target.append($('#dashboard-empty'));$('#dashboard-empty').hidden=false;}else $('#dashboard-empty').hidden=true;
@@ -57,6 +57,7 @@ function changePage(value,updateUrl=false) {
   applyDashboard();
 }
 function render() {
+  setFilter('#global-company',inventory.companies,'All companies');
   $('#company-count').textContent=inventory.companies.length;$('#location-count').textContent=inventory.locations.length;
   $('#device-count').textContent=inventory.devices.length;$('#online-count').textContent=inventory.devices.filter(d=>d.online).length;
   $('#connection').className='connection'+(inventory.error?' error':'');
@@ -75,7 +76,7 @@ function render() {
   bind('[data-invite]',b=>enroll(b.dataset.invite));bind('[data-group-invite]',b=>{const g=inventory.deviceGroups.find(g=>g.id===b.dataset.groupInvite);enroll(g.company_id,g.location_id,g.id);});
   bind('[data-edit-device]',b=>editDevice(b.dataset.editDevice));bind('[data-delete-device]',b=>deleteDevice(b.dataset.deleteDevice));
   bind('[data-remote]',b=>openRemote(b.dataset.remote));bind('[data-manage]',b=>manageDevice(b.dataset.manage));
-  bind('[data-edit-company]',b=>renameCompany(b.dataset.editCompany));bind('[data-company-location]',b=>locationForm(b.dataset.companyLocation));bind('[data-link-group]',b=>groupForm('', '', b.dataset.linkGroup));changePage(page);loadMetrics();
+  bind('[data-edit-company]',b=>renameCompany(b.dataset.editCompany));bind('[data-company-location]',b=>locationForm(b.dataset.companyLocation));bind('[data-link-group]',b=>groupForm('', '', b.dataset.linkGroup));changePage(page);loadMetrics();renderDashboardOverview();
 }
 const metrics=new Map(),metricsPending=new Set();
 function paintMetrics(d){
@@ -91,6 +92,27 @@ function paintMetrics(d){
   }
   status.textContent='System drive '+reading.diskName+' · Read at '+new Date(reading.checkedAt).toLocaleTimeString();
 }
+function renderDashboardOverview(){
+ const total=inventory.devices.length,online=inventory.devices.filter(d=>d.online).length,offline=total-online;
+ $('#endpoint-status').innerHTML=[['Online',online,'online'],['Offline',offline,'offline']].map(([name,count,kind])=>`<div class="endpoint-line"><span>${name}</span><div class="endpoint-track"><i data-endpoint-bar="${kind}"></i></div><strong>${count}</strong><small>${total?Math.round(count/total*100):0}%</small></div>`).join('');
+ for(const [key,value]of [['online',online],['offline',offline]])$('#endpoint-status').querySelector(`[data-endpoint-bar="${key}"]`).style.width=(total?value/total*100:0)+'%';
+ const fresh=inventory.devices.filter(d=>d.online).map(d=>metrics.get(d.id)).filter(m=>m&&!m.error&&Date.now()-Date.parse(m.checkedAt)<90000);
+ $('#endpoint-readings').innerHTML='<div class="reading-summary">'+['cpu','memory','disk'].map(key=>`<div><span>${key==='cpu'?'CPU':key==='memory'?'Memory':'System disk'}</span><strong>${fresh.length?Math.round(fresh.reduce((sum,m)=>sum+m[key],0)/fresh.length)+'%':'—'}</strong></div>`).join('')+'</div><p class="muted">Average of '+fresh.length+' recently reporting computers.</p>';
+ const links=acronisData.links||[],linked=inventory.devices.filter(d=>links.some(l=>l.node_id===d.id)).length;
+ $('#protection-summary').innerHTML=`<div class="coverage-row"><div class="coverage-ring" id="connectivity-ring"><strong>${total?Math.round(online/total*100):0}%</strong></div><div><strong>Device connectivity</strong><p>${online} online · ${offline} offline</p></div></div><div class="coverage-row"><div class="coverage-ring violet" id="backup-link-ring"><strong>${acronisData.checkedAt&&total?Math.round(linked/total*100)+'%':'—'}</strong></div><div><strong>Acronis device links</strong><p>${acronisData.checkedAt?linked+' linked · '+(total-linked)+' not linked':'Open Backups to load provider data'}</p></div></div>`;
+ $('#connectivity-ring').style.background=`conic-gradient(#08b489 ${total?online/total*360:0}deg,#e4f3ee 0deg)`;
+ $('#backup-link-ring').style.background=`conic-gradient(#8b5cf6 ${total?linked/total*360:0}deg,#ece7fa 0deg)`;
+ const alerts=[];
+ if(inventory.error)alerts.push({title:'Inventory synchronization failed',detail:inventory.error});
+ if(acronisData.error)alerts.push({title:'Acronis synchronization failed',detail:acronisData.error});
+ for(const device of inventory.devices){const reading=metrics.get(device.id);if(!device.online||!reading||reading.error||!(Date.now()-Date.parse(reading.checkedAt)<90000))continue;
+  for(const [key,limit,label]of [['cpu',90,'High CPU usage'],['memory',90,'High memory usage'],['disk',85,'System disk nearly full']])if(reading[key]>=limit)alerts.push({title:label+' ('+reading[key]+'% used)',detail:device.name+' · '+device.company+' · '+new Date(reading.checkedAt).toLocaleTimeString()});
+ }
+ $('#dashboard-alert-count').textContent=alerts.length;
+ $('#priority-alerts').innerHTML=alerts.length?alerts.slice(0,5).map(a=>`<div class="priority-item"><span aria-hidden="true">!</span><div><strong>${escape(a.title)}</strong><p>${escape(a.detail)}</p></div></div>`).join(''):'<div class="quiet-alert"><span aria-hidden="true">✓</span><strong>No current threshold alerts</strong><p>Based on available fresh readings.</p></div>';
+ $('#dashboard-device-table').innerHTML='<table><thead><tr><th>COMPUTER</th><th>COMPANY</th><th>STATUS</th><th>CPU</th><th>MEMORY</th><th>DISK</th><th>ACTION</th></tr></thead><tbody>'+devicesFiltered().map(d=>{const m=metrics.get(d.id),valid=d.online&&m&&!m.error&&Date.now()-Date.parse(m.checkedAt)<90000;return `<tr><td><button class="text-button" data-dashboard-device="${escape(d.id)}">${escape(d.name)}</button></td><td>${escape(d.company)}</td><td><span class="badge ${d.online?'':'offline'}">${d.online?'Online':'Offline'}</span></td><td>${valid?m.cpu+'%':'—'}</td><td>${valid?m.memory+'%':'—'}</td><td>${valid?m.disk+'%':'—'}</td><td><button data-dashboard-connect="${escape(d.id)}" ${!d.online||inventory.error?'disabled':''}>Connect ↗</button></td></tr>`;}).join('')+'</tbody></table>'+(total?'':'<p class="empty">Enroll a computer to see its inventory.</p>');
+ bind('[data-dashboard-device]',b=>manageDevice(b.dataset.dashboardDevice));bind('[data-dashboard-connect]',b=>openRemote(b.dataset.dashboardConnect));
+}
 async function loadMetrics(){
   const queue=devicesFiltered();queue.forEach(paintMetrics);
   async function worker(){for(let d;(d=queue.shift());){
@@ -99,7 +121,7 @@ async function loadMetrics(){
     metricsPending.add(d.id);
     try{metrics.set(d.id,{...await api('telemetry',{nodeId:d.id}),at:Date.now()});}
     catch(error){metrics.set(d.id,{error:error.message,at:Date.now()});}
-    finally{metricsPending.delete(d.id);const current=inventory.devices.find(x=>x.id===d.id);if(current)paintMetrics(current);}
+    finally{metricsPending.delete(d.id);const current=inventory.devices.find(x=>x.id===d.id);if(current)paintMetrics(current);renderDashboardOverview();}
   }}
   await Promise.all([worker(),worker()]);
 }
@@ -164,7 +186,7 @@ async function loadAcronis(){
     renderAcronis(await api('acronis'));acronisData=await api('acronis-inventory');
     if(acronisData.checkedAt&&!acronisData.error)renderAcronis({configured:true,authenticated:true,checkedAt:acronisData.checkedAt,consoleUrl:acronisData.consoleUrl});
     $('#acronis-inventory-status').textContent=acronisData.error||(acronisData.checkedAt?'Imported '+acronisData.resources.length+' resources · '+acronisData.tasks.length+' tasks · Checked '+new Date(acronisData.checkedAt).toLocaleString()+(acronisData.complete?'':'. Partial inventory; additional pages may be unavailable.'):'Waiting for Acronis credentials.');
-    renderBackups();
+    renderBackups();renderDashboardOverview();
   }catch(error){$('#acronis-inventory-status').textContent=error.message;}finally{acronisLoading=false;}
 }
 function backupDate(value){return value&&Number.isFinite(Date.parse(value))?new Date(value).toLocaleString():'Not verified';}
@@ -199,6 +221,9 @@ $('#logout').onclick=async()=>{try{await api('logout',{});$('#modal').close();$(
 $('#sync').onclick=async()=>{$('#sync').disabled=true;try{await api('sync',{});message('');}catch(error){message(error.message);}finally{await refresh();$('#sync').disabled=false;}};
 $('#search').oninput=render;['#company-filter','#location-filter','#group-filter','#status-filter'].forEach(id=>$(id).onchange=render);
 $('#add-customer').onclick=()=>{showDialog(`<h2>Add customer</h2><form id="customer-form"><label>Customer name<input name="name" required maxlength="120" placeholder="Client or customer contact"></label>${actions('Save customer')}</form>`);submitForm('#customer-form','customers');};
+$('#global-search').oninput=()=>{$('#search').value=$('#global-search').value;changePage('devices',true);render();};
+$('#global-company').onchange=()=>{$('#company-filter').value=$('#global-company').value;$('#backup-company').value=$('#global-company').value;render();if(page==='backups')renderBackups();};
+$('#view-all-computers').onclick=()=>changePage('devices',true);$('#quick-remote').onclick=()=>changePage('devices',true);
 $('#customize-dashboard').onclick=customizeDashboard;$('#quick-device').onclick=()=>enroll();$('#quick-company').onclick=companyForm;$('#quick-backups').onclick=()=>changePage('backups',true);
 $('#add-company').onclick=companyForm;$('#add-device').onclick=()=>enroll($('#company-filter').value,$('#location-filter').value,$('#group-filter').value);$('#add-location').onclick=()=>locationForm();$('#add-group').onclick=()=>groupForm();bind('[data-page]',b=>changePage(b.dataset.page,true));
 window.addEventListener('popstate',()=>changePage(pageFromUrl()));

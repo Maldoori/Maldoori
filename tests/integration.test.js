@@ -143,6 +143,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('[name="username"]').fill('test-admin');
       await page.locator('[name="password"]').fill('test-rmm-password-long');
       await page.locator('#login-form button').click();
+      await page.locator('[data-page="devices"]').click();
       await page.locator('#devices').getByText('REAL-WINDOWS',{exact:true}).waitFor();
       await page.locator('.device-card').filter({has:page.getByText('REAL-WINDOWS',{exact:true})}).locator('[data-metric-value="cpu"]').getByText('42%',{exact:true}).waitFor();
       assert.equal(await page.locator('[data-remote]').count(),3);assert.equal(await page.locator('[data-remote]:enabled').count(),1);
@@ -157,7 +158,8 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       assert.equal(await page.locator('#acronis-console').isVisible(),false);
       await page.locator('[data-page="overview"]').click();
       await page.goBack();await page.locator('#backups-panel').waitFor({state:'visible'});
-      await page.goForward();await page.locator('#devices-panel').waitFor({state:'visible'});
+      await page.goForward();await page.locator('#dashboard-layout').waitFor({state:'visible'});
+      await page.locator('[data-page="companies"]').click();
       await page.locator('[data-invite]').first().click();
       await page.locator('#add-device-form .primary').click();
       await page.getByRole('heading',{name:'Enroll a Windows computer'}).waitFor();
@@ -219,11 +221,14 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.reload();await page.locator('#dashboard-layout').waitFor({state:'visible'});
       assert.equal(await page.locator('#companies-panel').isVisible(),false);
       assert.equal(await page.locator('#dashboard-layout').getAttribute('class'),'dashboard-layout dashboard-columns-2');
-      assert.equal(await page.locator('#dashboard-layout').evaluate(el=>el.children[2].id),'devices-panel');
+      assert.equal(await page.locator('#dashboard-layout').evaluate(el=>{const ids=[...el.children].map(x=>x.id);return ids.indexOf('devices-panel')<ids.indexOf('companies-panel');}),true);
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
       await page.locator('[data-page="companies"]').click();await page.locator('#companies-panel').waitFor({state:'visible'});
       await page.locator('[data-page="overview"]').click();await page.locator('#customize-dashboard').click();
       await page.locator('#dashboard-reset').click();await page.locator('#dashboard-save').click();
+      await page.setViewportSize({width:1660,height:1000});
+      await page.screenshot({path:'/tmp/skybase-dashboard-redesign.png',fullPage:true});
+      await page.locator('[data-page="devices"]').click();
       const edit=page.locator('[data-edit-device]').filter({hasText:'Edit'}).first();await edit.click();
       await page.locator('#edit-device-form [name="name"]').fill('Office computer');await page.locator('#edit-device-form .primary').click();
       await page.locator('#devices').getByText('Office computer',{exact:true}).waitFor();
