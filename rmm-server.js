@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {initializeMonitoring,saveMonitorRule,closeMonitorRule,observeMonitor} from './lib/monitoring.js';
 import {initializeProviders,ProviderRegistry,consoleURL} from './lib/providers.js';
 import {AgentStore,AgentAI} from './lib/ai-agents.js';
 import {initializeTickets,ticketInput,createTicket,importTicketEmail} from './lib/tickets.js';
@@ -52,6 +53,7 @@ refreshAcronisProvider();
 initializePatches(db);
 db.exec("CREATE TABLE IF NOT EXISTS patch_notifications(id INTEGER PRIMARY KEY,patch_id TEXT NOT NULL REFERENCES patches(id) ON DELETE CASCADE,node_id TEXT NOT NULL,message TEXT NOT NULL,at TEXT NOT NULL)");
 initializeTickets(db);
+initializeMonitoring(db);
 const ticketConfigPath=resolve(dataDir,'ticketing-credentials.json');let ticketConfig={};
 try{const metadata=await lstat(ticketConfigPath);if(!metadata.isFile()||(metadata.mode&0o077))throw new Error('Ticketing credentials must be an owner-only regular file (chmod 600).');ticketConfig=JSON.parse(await readFile(ticketConfigPath,'utf8'));if(!ticketConfig||typeof ticketConfig!=='object'||Array.isArray(ticketConfig))throw new Error('Invalid ticketing credentials file.');}catch(error){if(error.code!=='ENOENT')throw error;}
 const ticketSetting=name=>ticketConfig[name]??setting(name);
@@ -102,6 +104,25 @@ function startCompanyNotice(id,devices,patch,notice){
  }};
  void Promise.all(Array.from({length:Math.min(3,queue.length)},worker)).then(()=>{db.prepare("UPDATE patch_notice_jobs SET status='completed' WHERE id=?").run(id);}).catch(()=>{db.prepare("UPDATE patch_notice_targets SET status='uncertain',detail='Notification job interrupted. Check delivery before retrying.' WHERE job_id=? AND status IN ('queued','sending')").run(id);db.prepare("UPDATE patch_notice_jobs SET status='completed' WHERE id=?").run(id);});
 }
+async function collectTelemetry(device,maxAge=30000){
+ if(directoryBusy.has(device.id)||networkBusy.has(device.id)||notificationBusy.has(device.id)||serviceBusy.has(device.id))throw Object.assign(new Error('A command is running on this computer. Retry after it completes.'),{status:409});const cached=telemetryCache.get(device.id);if(cached&&Date.now()-Date.parse(cached.checkedAt)<maxAge)return cached;
+ if(!telemetryBusy.has(device.id)){if(telemetryBusy.size>=4)throw Object.assign(new Error('Metrics collection is busy. Try again shortly.'),{status:429});const command=telemetryCommand();telemetryBusy.set(device.id,(async()=>{const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,telemetry:true});const value={...parseTelemetry(output.result,command.marker),nodeId:device.id,checkedAt:new Date().toISOString()};telemetryCache.set(device.id,value);return value;})().finally(()=>telemetryBusy.delete(device.id)));}return telemetryBusy.get(device.id);
+}
+let monitoringRunning=false,monitoringState={checkedAt:null,error:null,evaluated:0,unavailable:0};const monitoringServices=new Map();try{const saved=db.prepare("SELECT value FROM monitor_settings WHERE id='health'").get();if(saved)monitoringState=JSON.parse(saved.value);}catch{}
+async function readMonitorServices(device){const cached=monitoringServices.get(device.id);if(cached&&Date.now()-Date.parse(cached.at)<30000)return cached;if(directoryBusy.has(device.id)||networkBusy.has(device.id)||notificationBusy.has(device.id)||serviceBusy.has(device.id)||telemetryBusy.has(device.id))throw Error('Agent is busy.');serviceBusy.add(device.id);try{const command=serviceCommand();const encoded='powershell.exe -NoProfile -NonInteractive -EncodedCommand '+Buffer.from('# SkyBaseServiceMonitor\n'+command.script,'utf16le').toString('base64');const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:encoded,reply:true,runAsUser:0},{output:true});const result={services:parseServiceOutput(output.result,command.marker),at:new Date().toISOString()};monitoringServices.set(device.id,result);return result;}finally{serviceBusy.delete(device.id);}}
+async function monitoringCheck(){if(monitoringRunning)return;monitoringRunning=true;let evaluated=0,unavailable=0;try{const rules=db.prepare('SELECT * FROM monitor_rules WHERE enabled=1').all();if(!rules.length){monitoringState={checkedAt:new Date().toISOString(),error:null,evaluated:0,unavailable:0};return;}await synchronize();if(snapshot.error)throw Error('Inventory sync failed. Device conditions were not evaluated.');if(rules.some(r=>r.type==='backup')&&acronis.configured)await syncAcronis();
+ const devices=snapshot.devices.filter(d=>d.mapped&&rules.some(r=>!r.company_id||r.company_id===d.companyId));const deviceMap=new Map(snapshot.devices.map(d=>[d.id,d]));for(const alert of db.prepare("SELECT * FROM monitor_alerts WHERE status IN ('active','acknowledged')").all()){const device=deviceMap.get(alert.node_id),rule=rules.find(r=>r.id===alert.rule_id);if(!device||!rule||rule.company_id&&rule.company_id!==device.companyId||alert.company_id!==device.companyId){db.prepare("UPDATE monitor_alerts SET status='closed',closure_reason='Device or rule left the monitored scope; recovery was not inferred.',updated_at=? WHERE id=?").run(new Date().toISOString(),alert.id);db.prepare('DELETE FROM monitor_states WHERE rule_id=? AND node_id=?').run(alert.rule_id,alert.node_id);}}
+ const inventoryAt=snapshot.lastSync;for(const device of devices)for(const rule of rules.filter(r=>r.type==='offline'&&(!r.company_id||r.company_id===device.companyId))){const event=observeMonitor(db,rule,device,{value:!device.online,at:inventoryAt,detail:device.online?'Agent is online.':'Agent reported offline in a successful inventory sync.'});evaluated++;if(event)audit('monitoring-'+event.event,event.id);}
+ const queue=[...devices];const worker=async()=>{while(queue.length){const device=queue.shift(),applicable=rules.filter(r=>r.type!=='offline'&&(!r.company_id||r.company_id===device.companyId));let metrics=null,services=null;
+ if(device.online&&device.windows&&applicable.some(r=>['cpu','memory','disk'].includes(r.type)))try{metrics=await collectTelemetry(device);}catch{}
+ if(device.online&&device.windows&&applicable.some(r=>r.type==='service'))try{services=await readMonitorServices(device);}catch{}
+ for(const rule of applicable){let sample={value:null,at:new Date().toISOString(),detail:'Reading unavailable; no failure inferred.'};if(rule.type==='offline')sample={value:!device.online,at:snapshot.lastSync,detail:device.online?'Agent is online.':'Agent reported offline in a successful inventory sync.'};
+ else if(['cpu','memory','disk'].includes(rule.type)&&metrics)sample={value:metrics[rule.type],at:metrics.checkedAt,detail:`${rule.type==='disk'?'System disk '+metrics.diskName:rule.type}: ${metrics[rule.type]}% used. Trigger ≥${rule.threshold}%; recover ≤${rule.recovery}%.`};
+ else if(rule.type==='service'&&services){const service=services.services.find(s=>s.name.toLowerCase()===rule.service_name.toLowerCase());if(service&&['Running','Stopped'].includes(service.state))sample={value:service.state==='Stopped',at:services.at,detail:`Service ${service.name}: ${service.state}.`};else sample.detail='Service not found or state is unconfirmed.';}
+ else if(rule.type==='backup'){const link=db.prepare('SELECT resource_id FROM acronis_links WHERE node_id=?').get(device.id),task=link&&acronisInventory.backupResults?.find(b=>b.resourceId===link.resource_id)?.latestTask;if(!acronisInventory.error&&task&&['completed','failed'].includes(task.state)&&task.result&&!['unknown','unavailable'].includes(task.result)){sample={value:task.state==='failed'||task.result!=='ok',at:acronisInventory.checkedAt,detail:`Verified resource-linked backup task: ${task.state} / ${task.result}. Task ${task.id}.`};}else sample.detail='No fresh, uniquely linked backup result is available.';}
+ if(sample.value===null)unavailable++;else evaluated++;const event=observeMonitor(db,rule,device,sample);if(event)audit('monitoring-'+event.event,event.id);
+ }} };await Promise.all([worker(),worker()]);monitoringState={checkedAt:new Date().toISOString(),error:null,evaluated,unavailable};
+ }catch{db.prepare("UPDATE monitor_states SET since=NULL,state='unknown',detail='Monitoring check unavailable; pending duration reset.'").run();monitoringState={checkedAt:new Date().toISOString(),error:'Monitoring check could not complete. Check inventory/provider connectivity. Unknown readings do not create device-failure tickets.',evaluated,unavailable};}finally{monitoringRunning=false;db.prepare("INSERT INTO monitor_settings VALUES ('health',?) ON CONFLICT(id) DO UPDATE SET value=excluded.value").run(JSON.stringify(monitoringState));}}
 let companyBusy = false;
 const sessions = new Map(), attempts = new Map();
 const lifetime = 8 * 60 * 60 * 1000;
@@ -206,6 +227,13 @@ const server = http.createServer(async (req, res) => {
       if(req.method==='POST'&&url.pathname==='/api/provider-console'){
         const input=await body(req);if(providerBusy)return reply(res,409,{error:'Provider settings are being updated.'});if(!['backup','security'].includes(input.kind)||typeof input.provider!=='string'||!providerRegistry.row(input.kind,input.provider))return reply(res,404,{error:'Provider not found.'});const url=consoleURL(input.consoleUrl);db.prepare("UPDATE integration_providers SET console_url=?,test_status='untested',test_detail='',tested_at=NULL WHERE kind=? AND id=?").run(url,input.kind,input.provider);audit('provider-console-configured',input.kind+':'+input.provider);return reply(res,200,{ok:true});
       }
+      if(req.method==='GET'&&url.pathname==='/api/monitoring'){
+        const rules=db.prepare('SELECT r.*,c.name AS company FROM monitor_rules r LEFT JOIN companies c ON c.id=r.company_id ORDER BY r.name').all();const alerts=db.prepare('SELECT a.*,t.number AS ticket_number,t.deleted_at AS ticket_deleted,t.status AS ticket_status,s.last_seen AS observation_at,s.state AS observation_state FROM monitor_alerts a LEFT JOIN tickets t ON t.id=a.ticket_id LEFT JOIN monitor_states s ON s.rule_id=a.rule_id AND s.node_id=a.node_id ORDER BY a.updated_at DESC LIMIT 300').all();return reply(res,200,{rules,alerts,health:{...monitoringState,running:monitoringRunning},counts:db.prepare('SELECT status,COUNT(*) AS count FROM monitor_alerts GROUP BY status').all(),observations:db.prepare('SELECT state,COUNT(*) AS count FROM monitor_states GROUP BY state').all(),recentObservations:db.prepare("SELECT s.*,r.name AS rule_name,r.duration FROM monitor_states s JOIN monitor_rules r ON r.id=s.rule_id WHERE s.state IN ('pending','unknown') ORDER BY s.last_seen DESC LIMIT 100").all()});
+      }
+      if(req.method==='POST'&&url.pathname==='/api/monitor-rule-save'){const input=await body(req);if(monitoringRunning)return reply(res,409,{error:'Wait for the current monitoring check to finish.'});const rule=saveMonitorRule(db,input);audit('monitor-rule-saved',rule.id);return reply(res,200,rule);}
+      if(req.method==='POST'&&url.pathname==='/api/monitor-rule-delete'){const input=await body(req);if(monitoringRunning)return reply(res,409,{error:'Wait for the current monitoring check to finish.'});if(typeof input.id!=='string'||input.confirm!==true)return reply(res,400,{error:'Confirm deletion of the monitoring rule.'});if(!db.prepare('SELECT id FROM monitor_rules WHERE id=?').get(input.id))return reply(res,404,{error:'Rule not found.'});closeMonitorRule(db,input.id,'Rule removed; ticket history retained.');db.prepare('DELETE FROM monitor_rules WHERE id=?').run(input.id);audit('monitor-rule-deleted',input.id);return reply(res,200,{ok:true});}
+      if(req.method==='POST'&&url.pathname==='/api/monitor-check'){await body(req);if(monitoringRunning)return reply(res,409,{error:'A monitoring check is already running.'});void monitoringCheck();return reply(res,202,{running:true});}
+      if(req.method==='POST'&&url.pathname==='/api/monitor-acknowledge'){const input=await body(req);if(typeof input.id!=='string')return reply(res,400,{error:'Choose an alert.'});const alert=db.prepare('SELECT * FROM monitor_alerts WHERE id=?').get(input.id);if(!alert)return reply(res,404,{error:'Alert not found.'});if(alert.status!=='active')return reply(res,409,{error:'Only active alerts can be acknowledged.'});db.prepare("UPDATE monitor_alerts SET status='acknowledged',updated_at=? WHERE id=?").run(new Date().toISOString(),input.id);audit('monitor-alert-acknowledged',input.id);return reply(res,200,{ok:true});}
       if(req.method==='GET'&&url.pathname==='/api/provider-registry')return reply(res,200,{backup:providerRegistry.list('backup'),security:providerRegistry.list('security'),adapters:[{id:'console',name:'Console only',kinds:['backup','security']},{id:'acronis-backup',name:'Acronis backup API',kinds:['backup']}]});
       if(req.method==='POST'&&['/api/provider-save','/api/provider-delete','/api/provider-test'].includes(url.pathname)){
         const input=await body(req);if(providerBusy||acronisSync)return reply(res,409,{error:'Wait for the current provider operation to finish.'});providerBusy=true;const altersAcronis=input.kind==='backup'&&(input.adapter==='acronis-backup'||providerRegistry.row('backup',input.id||'')?.adapter==='acronis-backup');
@@ -272,17 +300,7 @@ const server = http.createServer(async (req, res) => {
         if(!device.online)return reply(res,409,{error:'Computer is offline.'});
         if(!device.windows)return reply(res,400,{error:'Metrics currently support Windows computers.'});
         if(directoryBusy.has(device.id)||networkBusy.has(device.id)||notificationBusy.has(device.id))return reply(res,409,{error:'A directory sync, network scan, or user notification is running on this computer.'});
-        const cached=telemetryCache.get(device.id);
-        if(cached&&Date.now()-Date.parse(cached.checkedAt)<30000)return reply(res,200,cached);
-        if(!telemetryBusy.has(device.id)){
-          if(telemetryBusy.size>=4)return reply(res,429,{error:'Metrics collection is busy. Try again shortly.'});
-          const command=telemetryCommand();
-          telemetryBusy.set(device.id,(async()=>{
-            const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,telemetry:true});
-            const result={...parseTelemetry(output.result,command.marker),nodeId:device.id,checkedAt:new Date().toISOString()};telemetryCache.set(device.id,result);return result;
-          })().finally(()=>telemetryBusy.delete(device.id)));
-        }
-        return reply(res,200,await telemetryBusy.get(device.id));
+        return reply(res,200,await collectTelemetry(device));
       }
       if(req.method==='POST' && ['/api/device-update','/api/device-delete'].includes(url.pathname)){
         const input=await body(req);await synchronize();
@@ -580,6 +598,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 if(ticketAI.configured&&ticketAI.auto)void drainTicketAI().catch(()=>{});
+const monitoringPoll=setInterval(()=>{if(db.prepare('SELECT id FROM monitor_rules WHERE enabled=1 LIMIT 1').get())void monitoringCheck();},60000);monitoringPoll.unref();
 const ticketMailPoll=setInterval(()=>{if(ticketMailbox.configured)syncTicketMail().catch(()=>{});},60000);ticketMailPoll.unref();if(ticketMailbox.configured)syncTicketMail().catch(()=>{});
 server.listen(Number(process.env.PORT || 3001), process.env.BIND_ADDRESS || '127.0.0.1', () => console.log('Maldoori live backend listening on port ' + (process.env.PORT || 3001)));
-for (const signal of ['SIGTERM','SIGINT']) process.on(signal, () => { clearTimeout(ticketAutoTimer);clearInterval(ticketMailPoll);clearInterval(poll); clearInterval(cleanup); server.close(() => { db.close(); process.exit(0); }); });
+for (const signal of ['SIGTERM','SIGINT']) process.on(signal, () => { clearInterval(monitoringPoll);clearTimeout(ticketAutoTimer);clearInterval(ticketMailPoll);clearInterval(poll); clearInterval(cleanup); server.close(() => { db.close(); process.exit(0); }); });
