@@ -45,10 +45,11 @@ def main():
         token = json.load(response)['access_token']
     print('Authentication: OK')
     endpoints = ['/api/2/clients/' + urllib.parse.quote(client_id, safe=''),
-                 '/api/resource_management/v4/resources', '/api/task_manager/v2/tasks']
+                 '/api/resource_management/v4/resources', '/api/task_manager/v2/tasks',
+                 '/api/policy_management/v4/policies']
     resources = []
     for number, path in enumerate(endpoints, start=1):
-        print('\nCheck', number, ('API client scope', 'Resource inventory', 'Task history')[number - 1])
+        print('\nCheck', number, ('API client scope', 'Resource inventory', 'Task history', 'Backup policy API')[number - 1])
         try:
             req = urllib.request.Request(origin.rstrip('/') + path, headers={'Authorization': 'Bearer ' + token})
             with opener.open(req, timeout=20) as response:

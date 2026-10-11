@@ -147,6 +147,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('.device-card').filter({has:page.getByText('REAL-WINDOWS',{exact:true})}).locator('[data-metric-value="cpu"]').getByText('42%',{exact:true}).waitFor();
       assert.equal(await page.locator('[data-remote]').count(),3);assert.equal(await page.locator('[data-remote]:enabled').count(),1);
       await page.locator('[data-page="backups"]').click();
+      await page.getByText('Connection settings',{exact:true}).click();
       await page.locator('#acronis-connect').click();
       await page.waitForFunction(()=>document.querySelector('#acronis-status').textContent.includes('not configured'));
       assert.equal(await page.locator('#acronis-console').isVisible(),false);
