@@ -443,7 +443,7 @@ const server = http.createServer(async (req, res) => {
       }
       return reply(res, 404, { error:'Not found.' });
     }
-    const files = { '/src/assets/skybase-logo.svg':['src/assets/skybase-logo.svg','image/svg+xml'], '/':['src/live.html','text/html'], '/src/live.js':['src/live.js','text/javascript'], '/src/live.css':['src/live.css','text/css'] };
+    const files = { '/src/script-library.js':['src/script-library.js','text/javascript'], '/src/assets/skybase-logo.svg':['src/assets/skybase-logo.svg','image/svg+xml'], '/':['src/live.html','text/html'], '/src/live.js':['src/live.js','text/javascript'], '/src/live.css':['src/live.css','text/css'] };
     const file = files[url.pathname];
     if (!file || req.method !== 'GET') return reply(res, 404, { error:'Not found.' });
     const content = await readFile(resolve(root, file[0]));

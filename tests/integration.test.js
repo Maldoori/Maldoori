@@ -245,6 +245,16 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       assert.equal(new URL(page.url()).hash,'#network');await page.locator('#network-device-list').getByText('Office printer',{exact:true}).waitFor();
       await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-network-scan.png',fullPage:true});
       await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});
+      await page.locator('[data-page="scripts"]').click();
+      assert.equal(await page.locator('.script-card').count(),8);
+      await page.locator('[data-script-category="Monitoring"]').click();assert.equal(await page.locator('.script-card').count(),1);
+      await page.locator('[data-script-view="disk-space-report"]').click();assert.match(await page.locator('.script-code').textContent(),/Get-CimInstance Win32_LogicalDisk/);await page.locator('#modal [data-close]').click();
+      const downloadPromise=page.waitForEvent('download');await page.locator('[data-script-download="disk-space-report"]').click();const scriptDownload=await downloadPromise;assert.equal(scriptDownload.suggestedFilename(),'disk-space-report.ps1');
+      const downloaded=await readFile(await scriptDownload.path(),'utf8');assert.match(downloaded,/Get-CimInstance Win32_LogicalDisk/);assert.ok(downloaded.includes('\r\n'));
+      await page.locator('[data-script-category="All"]').click();await page.locator('#script-search').fill('DNS');assert.equal(await page.locator('.script-card').count(),1);await page.locator('#script-search').fill('');
+      await page.reload();await page.locator('#scripts-panel').waitFor({state:'visible'});assert.equal(new URL(page.url()).hash,'#scripts');assert.equal(await page.locator('.script-card').count(),8);
+      await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-script-marketplace.png',fullPage:true});
+      await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});
       await page.locator('[data-page="directory"]').click();
       await page.locator('#directory-company').selectOption((await api('inventory')).data.devices.find(d=>d.id==='node//original-device').companyId);
       await page.locator('#directory-sync').click();

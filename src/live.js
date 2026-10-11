@@ -1,6 +1,7 @@
+import {scriptLibrary} from './script-library.js';
 const $ = s => document.querySelector(s);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const pages=new Set(['overview','devices','companies','groups','backups','security','patches','network','directory']);
+const pages=new Set(['overview','devices','companies','groups','backups','security','patches','network','directory','scripts']);
 const pageFromUrl=()=>pages.has(location.hash.slice(1))?location.hash.slice(1):'overview';
 let inventory = {groups:[],customers:[],companies:[],locations:[],deviceGroups:[],devices:[]}, refreshing = false, page = pageFromUrl();
 const dashboardWidgets=[{id:'dashboard-stats',name:'Inventory totals'},{id:'dashboard-endpoints',name:'Endpoint status'},{id:'dashboard-coverage',name:'Protection overview'},{id:'dashboard-alerts',name:'Priority alerts'},{id:'dashboard-inventory',name:'Inventory table'},{id:'dashboard-quick',name:'Quick tools'},{id:'companies-panel',name:'Customers & companies'},{id:'devices-panel',name:'Computer cards and live metrics'},{id:'backups-panel',name:'Backup providers'}];
@@ -53,11 +54,12 @@ function changePage(value,updateUrl=false) {
   $('#backups-panel').hidden=page!=='backups';
   if(page==='backups'){loadAcronis();loadBackupProviders();}
   $('#groups-panel').hidden=page!=='groups';
+  $('#scripts-panel').hidden=page!=='scripts';if(page==='scripts')renderScripts();
   $('#directory-panel').hidden=page!=='directory';if(page==='directory'){renderDirectorySelectors();loadDirectory();}else clearTimeout(directoryTimer);
   $('#network-panel').hidden=page!=='network';if(page==='network'){renderNetworkSites();loadNetwork();}else clearTimeout(networkTimer);
   $('#patches-panel').hidden=page!=='patches';if(page==='patches')loadPatches();
   $('#security-panel').hidden=page!=='security';if(page==='security')loadSecurity();
-  $('#workspace-title').textContent={overview:'Dashboard',devices:'Computers',companies:'Customers & companies',groups:'Device groups',backups:'Backups',security:'Security',patches:'Patch Management',network:'Network Scan',directory:'Active Directory'}[page];
+  $('#workspace-title').textContent={overview:'Dashboard',devices:'Computers',companies:'Customers & companies',groups:'Device groups',backups:'Backups',security:'Security',patches:'Patch Management',network:'Network Scan',directory:'Active Directory',scripts:'Script Marketplace'}[page];
   applyDashboard();
 }
 function render() {
@@ -241,6 +243,15 @@ function renderBackups(){
   bind('[data-backup-info]',b=>{const d=inventory.devices.find(d=>d.id===b.dataset.backupInfo),link=acronisData.links.find(l=>l.node_id===d.id),backup=acronisData.backupResults?.find(r=>r.resourceId===link?.resource_id);showDialog(`<h2>${escape(d.name)} backup</h2><p class="muted">${escape(d.company)}</p><p>Last successful backup task: ${escape(backupDate(backup?.lastSuccessfulTaskAt))}</p><p class="muted">${backup?.latestTask?'Only tasks with a unique Acronis resource reference are shown.':'No uniquely matched backup task has been returned for this computer.'}</p><p class="muted">To run a backup, edit its schedule, or restore files, open the Acronis console and select this computer.</p><div class="actions"><button data-close>Close</button>${acronisData.consoleUrl?`<a class="button-link primary" href="${escape(acronisData.consoleUrl)}" target="_blank" rel="noopener noreferrer">Manage in Acronis ↗</a>`:''}</div>`);});
 }
 const networkTypes={unknown:'Unknown',workstation:'Workstations',server:'Servers',printer:'Printers',phone:'Phones',network:'Network devices'};
+let scriptCategory='All';
+function renderScripts(){const query=$('#script-search').value.toLowerCase();const rows=scriptLibrary.filter(s=>(scriptCategory==='All'||s.category===scriptCategory)&&`${s.name} ${s.description} ${s.category}`.toLowerCase().includes(query));$('#script-count').textContent=scriptLibrary.length+' Scripts';$('#script-categories').innerHTML=['All',...new Set(scriptLibrary.map(s=>s.category))].map(category=>`<button data-script-category="${escape(category)}" class="${scriptCategory===category?'active':''}" aria-pressed="${scriptCategory===category}">${escape(category)}</button>`).join('');bind('[data-script-category]',b=>{scriptCategory=b.dataset.scriptCategory;renderScripts();});
+ $('#script-list').innerHTML=rows.map(s=>`<article class="script-card"><div class="script-card-title"><h2>${escape(s.name)}</h2><span class="script-version">v1.0</span></div><div class="script-tags"><span>${escape(s.category)}</span><span>PowerShell</span></div><p>${escape(s.description)}</p><p class="script-effect">${escape(s.effect)}</p><small>by ${escape(s.author)}</small><div class="script-actions"><button data-script-view="${s.id}">〈/〉 View Code</button><button data-script-copy="${s.id}">▣ Copy</button><button data-script-download="${s.id}" class="script-download">⇩ Download</button></div></article>`).join('')||'<p class="empty">No scripts match your search.</p>';
+ bind('[data-script-view]',b=>viewScript(b.dataset.scriptView));bind('[data-script-copy]',b=>copyScript(b.dataset.scriptCopy));bind('[data-script-download]',b=>downloadScript(b.dataset.scriptDownload));}
+function viewScript(id){const s=scriptLibrary.find(s=>s.id===id);showDialog(`<h2>${escape(s.name)}</h2><p>${escape(s.description)}</p><p class="script-effect">${escape(s.effect)}</p><pre class="script-code" tabindex="0"><code>${escape(s.code)}</code></pre><p class="muted">Review and test on one computer before wider use. Downloading does not run this script or send it to an agent.</p><div class="actions"><button data-close>Close</button><button id="script-modal-copy">Copy code</button><button id="script-modal-download" class="script-download">Download .ps1</button></div>`);$('#script-modal-copy').onclick=()=>copyScript(id);$('#script-modal-download').onclick=()=>downloadScript(id);}
+async function copyScript(id){const s=scriptLibrary.find(s=>s.id===id);try{await navigator.clipboard.writeText(s.code);$('#script-message').textContent=s.name+' copied to clipboard.';}catch{showDialog(`<h2>Copy script</h2><p>Clipboard access is unavailable. Select and copy the code below.</p><textarea id="script-copy-text" readonly rows="16">${escape(s.code)}</textarea><button data-close>Close</button>`);$('#script-copy-text').select();}}
+function downloadScript(id){const s=scriptLibrary.find(s=>s.id===id),url=URL.createObjectURL(new Blob(['\uFEFF'+s.code.replace(/\r?\n/g,'\r\n')],{type:'text/plain;charset=utf-8'})),link=document.createElement('a');link.href=url;link.download=s.filename;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);$('#script-message').textContent=s.filename+' download requested. It has not been executed.';}
+$('#script-search').oninput=renderScripts;
+
 let directoryData={status:'empty',result:{}},directoryLoading=false,directoryStarting=false,directoryTimer,directoryTab='users';
 function renderDirectorySelectors(){const select=$('#directory-company');let saved='';try{saved=localStorage.getItem('skybase-directory-company')||'';}catch{}const selected=select.value||saved||inventory.companies[0]?.id||'';select.innerHTML=options(inventory.companies,selected,'Select company');renderDirectoryAgents();}
 function renderDirectoryAgents(){const select=$('#directory-agent'),agents=inventory.devices.filter(d=>d.companyId===$('#directory-company').value&&d.online&&d.windows);select.innerHTML=options(agents,select.value||agents[0]?.id||'','Select Windows directory agent');$('#directory-sync').disabled=directoryStarting||directoryData.status==='running'||!agents.length;}
