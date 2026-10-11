@@ -35,6 +35,13 @@ initializeCatalog(db);
 db.exec('CREATE TABLE IF NOT EXISTS known_devices(id TEXT PRIMARY KEY, group_id TEXT NOT NULL, details TEXT NOT NULL)');
 db.exec('CREATE TABLE IF NOT EXISTS device_preferences(id TEXT PRIMARY KEY,name TEXT,hidden INTEGER NOT NULL DEFAULT 0)');
 const telemetryCache=new Map(),telemetryBusy=new Map();
+db.exec('CREATE TABLE IF NOT EXISTS acronis_links(node_id TEXT PRIMARY KEY,resource_id TEXT NOT NULL UNIQUE,tenant_id TEXT NOT NULL)');
+let acronisInventory={resources:[],tasks:[],checkedAt:null,error:null},acronisSync;
+function syncAcronis(){
+  if(acronisSync)return acronisSync;
+  acronisSync=acronis.inventory().then(value=>{acronisInventory={...value,error:null};}).catch(error=>{acronisInventory.error=error.message;}).finally(()=>acronisSync=null);
+  return acronisSync;
+}
 const serviceBusy = new Set();
 let companyBusy = false;
 const sessions = new Map(), attempts = new Map();
@@ -172,6 +179,22 @@ const server = http.createServer(async (req, res) => {
           audit('computer-removed',device.id);
         }
         await synchronize();return reply(res,200,{ok:true});
+      }
+      if(req.method==='GET' && url.pathname==='/api/acronis-inventory'){
+        if(acronis.configured&&(!acronisInventory.checkedAt||Date.now()-Date.parse(acronisInventory.checkedAt)>60000))await syncAcronis();
+        return reply(res,200,{...acronisInventory,configured:acronis.configured,links:db.prepare('SELECT * FROM acronis_links').all().filter(l=>snapshot.devices.some(d=>d.id===l.node_id))});
+      }
+      if(req.method==='POST' && url.pathname==='/api/acronis-link'){
+        const input=await body(req);await synchronize();if(snapshot.error)return reply(res,502,{error:snapshot.error});
+        if(!snapshot.devices.some(d=>d.id===input.nodeId))return reply(res,404,{error:'Computer not found.'});
+        if(!input.resourceId){db.prepare('DELETE FROM acronis_links WHERE node_id=?').run(input.nodeId);audit('acronis-unlinked',input.nodeId);return reply(res,200,{ok:true});}
+        await syncAcronis();if(acronisInventory.error)return reply(res,502,{error:acronisInventory.error});
+        const resource=acronisInventory.resources.find(r=>r.id===input.resourceId);
+        if(!resource)return reply(res,400,{error:'Choose an accessible Acronis resource.'});
+        const assigned=db.prepare('SELECT node_id FROM acronis_links WHERE resource_id=? AND node_id<>?').get(resource.id,input.nodeId);
+        if(assigned)return reply(res,409,{error:'This Acronis resource is already linked to another computer.'});
+        db.prepare('INSERT INTO acronis_links(node_id,resource_id,tenant_id) VALUES (?,?,?) ON CONFLICT(node_id) DO UPDATE SET resource_id=excluded.resource_id,tenant_id=excluded.tenant_id').run(input.nodeId,resource.id,resource.tenantId);
+        audit('acronis-linked',input.nodeId);return reply(res,200,{ok:true});
       }
       if(req.method==='GET' && url.pathname==='/api/acronis')return reply(res,200,acronisConnection);
       if(req.method==='POST' && url.pathname==='/api/acronis-connect'){

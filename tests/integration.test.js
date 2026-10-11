@@ -51,8 +51,15 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   // Choose an available port without fixed-port collisions.
   const probe=https.createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));backendPort=probe.address().port;await new Promise(r=>probe.close(r));
   const origin='http://127.0.0.1:'+backendPort;
+  let mockAcronis=false;
   const start=async(useFile=false)=>{
     const env={...process.env,PORT:String(backendPort),PUBLIC_URL:origin,BIND_ADDRESS:'127.0.0.1',RMM_USERNAME:'test-admin',RMM_PASSWORD:'test-rmm-password-long',MESH_URL:meshUrl,MESH_USERNAME:'test-integration',MESH_PASSWORD:'test-mesh-password',DATA_DIR:resolve(dir,'data'),NODE_EXTRA_CA_CERTS:resolve(dir,'cert.pem')};
+    if(mockAcronis){
+      env.ACRONIS_URL='https://us15-cloud.acronis.com';env.ACRONIS_CLIENT_ID='mock';env.ACRONIS_CLIENT_SECRET='mock';
+      const preload=resolve(dir,'acronis-preload.mjs');
+      await writeFile(preload,`globalThis.fetch=async(url)=>({ok:true,status:200,json:async()=>url.pathname.endsWith('/token')?{access_token:'private-token',expires_in:3600}:url.pathname.includes('resource_management')?{items:[{id:'acronis-computer',tenant_id:'client-tenant',tenant_name:'Client',name:'Computer',type:'machine'}]}:{items:[{uuid:'job',type:'backup',tenant:{id:'client-tenant',name:'Client'},state:'completed',result:{code:'ok',payload:'private'}}]}});`);
+      env.NODE_OPTIONS='--import='+preload;
+    }
     if(useFile){
       const config={};
       for(const key of ['RMM_USERNAME','RMM_PASSWORD','MESH_URL','MESH_USERNAME','MESH_PASSWORD']){config[key]=env[key];delete env[key];}
@@ -215,5 +222,17 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   await api('sync',{});assert.equal((await api('inventory')).data.devices.some(d=>d.id===remaining.id),false);
   await stop();await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
   assert.equal((await api('inventory')).data.devices.some(d=>d.id===remaining.id),false);
+  mockAcronis=true;await stop();await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
+  const available=(await api('inventory')).data.devices[0];
+  const imported=await api('acronis-inventory');assert.equal(imported.data.resources.length,1);assert.equal(imported.data.tasks[0].result,'ok');assert.equal(JSON.stringify(imported.data).includes('private'),false);
+  assert.equal((await api('acronis-link',{nodeId:available.id,resourceId:'missing'})).status,400);
+  assert.equal((await api('acronis-link',{nodeId:'unknown',resourceId:'acronis-computer'})).status,404);
+  assert.equal((await api('acronis-link',{nodeId:available.id,resourceId:'acronis-computer'})).status,200);
+  devices['mesh//existing-group'].push({_id:'node//second-acronis-link',name:'Second PC',conn:1});await api('sync',{});
+  assert.equal((await api('acronis-link',{nodeId:'node//second-acronis-link',resourceId:'acronis-computer'})).status,409);
+  await stop();await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
+  assert.equal((await api('acronis-inventory')).data.links[0].resource_id,'acronis-computer');
+  assert.equal((await api('acronis-link',{nodeId:available.id,resourceId:''})).status,200);
+  assert.equal((await api('acronis-inventory')).data.links.length,0);
   await api('logout',{});assert.equal((await api('inventory')).status,401);
 });

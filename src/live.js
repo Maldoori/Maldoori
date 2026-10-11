@@ -125,7 +125,22 @@ function renderAcronis(value){
   $('#acronis-console').hidden=!value.authenticated;
   if(value.authenticated)$('#acronis-console').href=value.consoleUrl;
 }
-async function loadAcronis(){try{renderAcronis(await api('acronis'));}catch(error){$('#acronis-status').textContent=error.message;}}
+let acronisData={resources:[],tasks:[],links:[]},acronisLoading=false;
+async function loadAcronis(){
+  if(acronisLoading)return;acronisLoading=true;
+  try{
+    renderAcronis(await api('acronis'));acronisData=await api('acronis-inventory');
+    if(acronisData.checkedAt&&!acronisData.error)renderAcronis({configured:true,authenticated:true,checkedAt:acronisData.checkedAt,consoleUrl:acronisData.consoleUrl});
+    $('#acronis-inventory-status').textContent=acronisData.error||(acronisData.checkedAt?'Imported '+acronisData.resources.length+' resources · '+acronisData.tasks.length+' tasks · Checked '+new Date(acronisData.checkedAt).toLocaleString()+(acronisData.complete?'':'. Partial inventory; additional pages may be unavailable.'):'Waiting for Acronis credentials.');
+    $('#acronis-computers').innerHTML=inventory.devices.map(d=>{const link=acronisData.links.find(l=>l.node_id===d.id),resource=acronisData.resources.find(r=>r.id===link?.resource_id);return `<div class="company-row"><div><strong>${escape(d.name)}</strong><p class="muted">${escape(d.company)} · ${resource?'Acronis: '+escape(resource.name)+' / '+escape(resource.tenant):link?'Linked resource unavailable; check Acronis permissions.':'Not linked to Acronis'}</p></div><button data-acronis-link="${escape(d.id)}" ${acronisData.error||!acronisData.checkedAt?'disabled':''}>${link?'Change link':'Link Acronis device'}</button></div>`;}).join('')||'<p class="empty">No RMM computers available.</p>';
+    $('#acronis-tasks').innerHTML='<table><thead><tr><th>CUSTOMER</th><th>TASK</th><th>STATE</th><th>RESULT CODE</th><th>COMPLETED</th></tr></thead><tbody>'+acronisData.tasks.map(t=>`<tr><td>${escape(t.tenant)}</td><td>${escape(t.title)}<small>${escape(t.type)}</small></td><td>${escape(t.state)}</td><td>${escape(t.result)}</td><td>${escape(t.completedAt||'Not reported')}</td></tr>`).join('')+'</tbody></table>';
+    bind('[data-acronis-link]',b=>linkAcronis(b.dataset.acronisLink));
+  }catch(error){$('#acronis-inventory-status').textContent=error.message;}finally{acronisLoading=false;}
+}
+function linkAcronis(id){
+  const d=inventory.devices.find(d=>d.id===id),link=acronisData.links.find(l=>l.node_id===id);
+  showDialog(`<h2>Link Acronis device</h2><p class="muted">${escape(d.name)} · ${escape(d.company)}. Confirm the correct customer and computer before saving.</p><form id="acronis-link-form"><input type="hidden" name="nodeId" value="${escape(id)}"><label>Acronis resource<select name="resourceId">${options(acronisData.resources.map(r=>({id:r.id,name:r.tenant+' / '+r.name+' / '+r.type})),link?.resource_id,'Not linked')}</select></label><p class="muted">This links existing records; it does not create a backup plan or deploy an agent.</p>${actions('Save link')}</form>`);submitForm('#acronis-link-form','acronis-link',loadAcronis);
+}
 $('#acronis-connect').onclick=async()=>{const b=$('#acronis-connect');b.disabled=true;$('#acronis-status').textContent='Checking Acronis authentication…';try{renderAcronis(await api('acronis-connect',{}));}catch(error){$('#acronis-console').hidden=true;$('#acronis-status').textContent=error.message;}finally{b.disabled=false;}};
 $('#modal').addEventListener('close',()=>$('#modal').classList.remove('wide'));
 $('#login-form').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{await api('login',Object.fromEntries(new FormData(e.target)));e.target.reset();message('');await refresh();}catch(error){message(error.message);}finally{b.disabled=false;}};

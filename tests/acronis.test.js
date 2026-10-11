@@ -25,3 +25,20 @@ test('Acronis handles missing credentials, untrusted URLs, and failed authentica
   const failed=new AcronisClient(settings,async()=>{throw new Error('fixture-secret');});
   await assert.rejects(failed.testConnection(),/Cannot connect securely/);
 });
+
+test('Acronis imports sanitized resources and task history with safe pagination',async()=>{
+ const client=new AcronisClient(settings,async(url,options)=>{
+  if(url.pathname.endsWith('/token'))return {ok:true,json:async()=>({access_token:'private-token',expires_in:3600})};
+  assert.equal(options.redirect,'error');assert.equal(options.headers.Authorization,'Bearer private-token');
+  if(url.pathname.includes('resource_management'))return {ok:true,json:async()=>url.search?{items:[{id:'r2',tenant_id:'t2',tenant_name:'Second company',name:'PC',type:'machine'}]}:{items:[{id:'r1',tenant_id:'t1',tenant_name:'First company',name:'PC',type:'machine',secret:'never-export'}],_links:[{rel:'next',href:'/api/resource_management/v4/resources?after=page2'}]}};
+  return {ok:true,json:async()=>({items:[{uuid:'job',type:'backup',tenant:{id:'t1',name:'First company'},state:'completed',result:{code:'ok',payload:'private-payload'},context:{title:'Backup',Specific:'private-context'},completedAt:'2026-10-10T21:00:00Z'}]})};
+ });
+ const data=await client.inventory();assert.equal(data.resources.length,2);assert.equal(data.tasks[0].state,'completed');assert.equal(data.tasks[0].tenantId,'t1');assert.equal(data.complete,true);assert.equal(JSON.stringify(data).includes('private-'),false);assert.equal(JSON.stringify(data).includes('never-export'),false);
+});
+test('Acronis refuses external pagination destinations and marks incomplete lists',async()=>{
+ let calls=0;
+ const client=new AcronisClient(settings,async(url)=>{calls++;return {ok:true,json:async()=>url.pathname.endsWith('/token')?{access_token:'token',expires_in:3600}:{items:[],_links:[{rel:'next',href:'https://evil.test/api/steal'}]}};});
+ await assert.rejects(client.collection('/api/resource_management/v4/resources'),/unsafe/);assert.equal(calls,2);
+ const partial=new AcronisClient(settings,async(url)=>({ok:true,json:async()=>url.pathname.endsWith('/token')?{access_token:'token',expires_in:3600}:{items:[],paging:{cursors:{total:50}}}}));
+ assert.equal((await partial.collection('/api/resource_management/v4/resources')).complete,false);
+});

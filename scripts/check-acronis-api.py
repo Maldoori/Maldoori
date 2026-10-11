@@ -2,6 +2,7 @@
 """Read-only API discovery. Print structure only, never credentials or provider bodies."""
 import base64
 import json
+import re
 from pathlib import Path
 import stat
 import urllib.error
@@ -56,6 +57,16 @@ def main():
                 value = json.loads(data)
                 print('HTTP:', response.status)
                 print(json.dumps(shape(value), indent=2))
+                if number == 3:
+                    for task in value.get('items', [])[:12]:
+                        enums = {key: item for key, item in {'type': task.get('type'), 'state': task.get('state'), 'result_code': task.get('result', {}).get('code')}.items() if isinstance(item, str) and re.fullmatch(r'[A-Za-z0-9_.:#-]{1,100}', item)}
+                        print('Task type/state/result:', json.dumps(enums))
+                        specific = task.get('context', {}).get('Specific')
+                        if isinstance(specific, str):
+                            try:
+                                print('Parsed task Specific structure:', json.dumps(shape(json.loads(specific)), indent=2))
+                            except (ValueError, TypeError):
+                                print('Task Specific is not JSON; value omitted.')
         except urllib.error.HTTPError as error:
             print('HTTP:', error.code, '(response body omitted)')
         except Exception:
