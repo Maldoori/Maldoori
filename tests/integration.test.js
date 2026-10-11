@@ -112,6 +112,15 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('security-settings',{provider:'bitdefender',consoleUrl:'https://user:secret@security.example/'})).status,400);
   assert.equal((await api('security-settings',{provider:'bitdefender',consoleUrl:'https://security.example/'})).status,200);
   assert.equal((await api('security')).data.providers.every(p=>!p.protectionVerified&&!p.apiConnected),true);
+  const patchInput={title:'Test KB update',description:'Fixture update',vendor:'Microsoft',category:'security',severity:'important',sizeMb:'85.2',releasedAt:'2026-10-01',rebootRequired:'yes',sourceUrl:'https://support.microsoft.com/'};
+  assert.equal((await api('patches')).data.deploymentConnected,false);
+  assert.equal((await api('patch-save',{...patchInput,releasedAt:'2026-02-30'})).status,400);
+  assert.equal((await api('patch-save',{...patchInput,sourceUrl:'https://user:secret@vendor.example/'})).status,400);
+  const createdPatch=await api('patch-save',patchInput);assert.equal(createdPatch.status,200);const patchId=createdPatch.data.id;
+  assert.equal((await api('patch-save',{...patchInput,id:patchId,title:'Edited KB update'})).status,200);
+  assert.equal((await api('patch-plan',{patchId,companyId:'missing'})).status,404);
+  assert.equal((await api('patch-delete',{id:patchId})).status,400);
+
 
   assert.equal((await api('backup-provider',{companyId,provider:'msp360'})).status,200);
   assert.equal((await api('msp360-settings',{consoleUrl:'http://msp360.example/'})).status,400);
@@ -217,6 +226,24 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('#provider-choice-form button.primary').click();
       await page.locator('#comet-companies').getByText('New company',{exact:true}).waitFor({state:'attached'});
       await page.locator('#backup-provider-view').selectOption('acronis');
+      await page.locator('[data-page="patches"]').click();
+      await page.locator('#patch-list').getByText('Edited KB update',{exact:true}).waitFor();
+      await page.reload();await page.locator('#patches-panel').waitFor({state:'visible'});
+      assert.equal(new URL(page.url()).hash,'#patches');
+      await page.locator('[data-patch-category="feature"]').click();assert.equal(await page.locator('.patch-card').count(),0);
+      await page.locator('[data-patch-category="all"]').click();
+      await page.locator('#patch-search').fill('Microsoft');assert.equal(await page.locator('.patch-card').count(),1);
+      await page.locator('[data-patch-deploy]').click();
+      await page.locator('#patch-plan-form select').selectOption(companyId);
+      await page.locator('#patch-plan-form button.primary').click();
+      await page.waitForFunction(()=>document.querySelector('.patch-counts')?.textContent.includes('Planned: 1'));
+      await page.locator('[data-patch-edit]').click();
+      await page.locator('#patch-form input[name="title"]').fill('Browser edited update');
+      await page.locator('#patch-form button.primary').click();
+      await page.locator('#patch-list').getByText('Browser edited update',{exact:true}).waitFor();
+      await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-patch-management.png',fullPage:true});
+      await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
+      await page.setViewportSize({width:1560,height:960});
       await page.locator('[data-page="security"]').click();
       await page.locator('#security-computers .antivirus-card').first().waitFor();
       assert.equal(await page.locator('#security-computers .antivirus-card').count(),3);
@@ -330,6 +357,9 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   await api('sync',{});assert.equal((await api('inventory')).data.devices.some(d=>d.id===remaining.id),false);
   await stop();await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
   assert.equal((await api('inventory')).data.devices.some(d=>d.id===remaining.id),false);
+  const savedPatch=(await api('patches')).data;assert.equal(savedPatch.patches.length,1);assert.equal(savedPatch.patches[0].id,patchId);
+  assert.equal((await api('patch-delete',{id:patchId,confirm:true})).status,200);
+  const clearedPatches=(await api('patches')).data;assert.equal(clearedPatches.patches.length,0);assert.equal(clearedPatches.rollouts.length,0);
   assert.equal((await api('security')).data.preferences.find(p=>p.company_id===companyId).provider,'bitdefender');
   assert.equal((await api('security')).data.providers.find(p=>p.id==='bitdefender').consoleUrl,'https://security.example/');
   const choices=(await api('backup-providers')).data;assert.equal(choices.preferences.find(p=>p.company_id===companyId).provider,'comet');assert.equal(choices.comet.consoleUrl,'https://comet.example/');

@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {initializePatches,savePatch} from './lib/patches.js';
 import { readFile, mkdir, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
@@ -42,6 +43,7 @@ if(!db.prepare("SELECT sql FROM sqlite_master WHERE name='backup_preferences'").
   db.exec("BEGIN; CREATE TABLE backup_preferences_next(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('acronis','comet','msp360'))); INSERT INTO backup_preferences_next SELECT * FROM backup_preferences; DROP TABLE backup_preferences; ALTER TABLE backup_preferences_next RENAME TO backup_preferences; COMMIT;");
 }
 db.exec("CREATE TABLE IF NOT EXISTS security_preferences(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('bitdefender','defender','acronis'))); CREATE TABLE IF NOT EXISTS security_settings(provider TEXT PRIMARY KEY CHECK(provider IN ('bitdefender','defender','acronis')),console_url TEXT NOT NULL)");
+initializePatches(db);
 let acronisInventory={resources:[],tasks:[],backupResults:[],checkedAt:null,error:null},acronisSync;
 function syncAcronis(){
   if(acronisSync)return acronisSync;
@@ -185,6 +187,20 @@ const server = http.createServer(async (req, res) => {
           audit('computer-removed',device.id);
         }
         await synchronize();return reply(res,200,{ok:true});
+      }
+      if(req.method==='GET' && url.pathname==='/api/patches')return reply(res,200,{patches:db.prepare('SELECT * FROM patches ORDER BY title').all(),rollouts:db.prepare('SELECT * FROM patch_rollouts').all().filter(r=>snapshot.devices.some(d=>d.id===r.node_id)),deploymentConnected:false});
+      if(req.method==='POST' && url.pathname==='/api/patch-save'){const input=await body(req);const id=savePatch(db,input);audit('patch-catalog-saved',id);return reply(res,200,{ok:true,id});}
+      if(req.method==='POST' && url.pathname==='/api/patch-delete'){
+        const input=await body(req);if(input.confirm!==true)return reply(res,400,{error:'Confirm removing this patch from the catalog.'});
+        if(typeof input.id!=='string'||!db.prepare('SELECT id FROM patches WHERE id=?').get(input.id))return reply(res,404,{error:'Patch not found.'});
+        db.prepare('DELETE FROM patches WHERE id=?').run(input.id);audit('patch-catalog-deleted',input.id);return reply(res,200,{ok:true});
+      }
+      if(req.method==='POST' && url.pathname==='/api/patch-plan'){
+        const input=await body(req);if(typeof input.patchId!=='string'||!db.prepare('SELECT id FROM patches WHERE id=?').get(input.patchId))return reply(res,404,{error:'Patch not found.'});
+        if(typeof input.companyId!=='string'||!db.prepare('SELECT id FROM companies WHERE id=?').get(input.companyId))return reply(res,404,{error:'Company not found.'});
+        const devices=snapshot.devices.filter(d=>d.companyId===input.companyId&&/windows/i.test(d.os));if(!devices.length)return reply(res,400,{error:'No Windows computers found in this company.'});
+        const at=new Date().toISOString();db.exec('BEGIN');try{for(const d of devices)db.prepare('INSERT INTO patch_rollouts VALUES (?,?,?) ON CONFLICT(patch_id,node_id) DO NOTHING').run(input.patchId,d.id,at);db.exec('COMMIT');}catch(error){db.exec('ROLLBACK');throw error;}
+        audit('patch-rollout-planned',input.patchId);return reply(res,200,{ok:true,planned:devices.length,executed:false});
       }
       if(req.method==='GET' && url.pathname==='/api/security')return reply(res,200,{preferences:db.prepare('SELECT * FROM security_preferences').all(),providers:['bitdefender','defender','acronis'].map(id=>({id,consoleUrl:db.prepare('SELECT console_url FROM security_settings WHERE provider=?').get(id)?.console_url||(id==='acronis'&&acronis.configured?acronis.url.href:null),protectionVerified:false,apiConnected:false}))});
       if(req.method==='POST' && url.pathname==='/api/security-provider'){
