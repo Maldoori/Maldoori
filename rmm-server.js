@@ -41,6 +41,7 @@ db.exec("CREATE TABLE IF NOT EXISTS backup_preferences(company_id TEXT PRIMARY K
 if(!db.prepare("SELECT sql FROM sqlite_master WHERE name='backup_preferences'").get().sql.includes("'msp360'")){
   db.exec("BEGIN; CREATE TABLE backup_preferences_next(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('acronis','comet','msp360'))); INSERT INTO backup_preferences_next SELECT * FROM backup_preferences; DROP TABLE backup_preferences; ALTER TABLE backup_preferences_next RENAME TO backup_preferences; COMMIT;");
 }
+db.exec("CREATE TABLE IF NOT EXISTS security_preferences(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('bitdefender','defender','acronis'))); CREATE TABLE IF NOT EXISTS security_settings(provider TEXT PRIMARY KEY CHECK(provider IN ('bitdefender','defender','acronis')),console_url TEXT NOT NULL)");
 let acronisInventory={resources:[],tasks:[],backupResults:[],checkedAt:null,error:null},acronisSync;
 function syncAcronis(){
   if(acronisSync)return acronisSync;
@@ -184,6 +185,22 @@ const server = http.createServer(async (req, res) => {
           audit('computer-removed',device.id);
         }
         await synchronize();return reply(res,200,{ok:true});
+      }
+      if(req.method==='GET' && url.pathname==='/api/security')return reply(res,200,{preferences:db.prepare('SELECT * FROM security_preferences').all(),providers:['bitdefender','defender','acronis'].map(id=>({id,consoleUrl:db.prepare('SELECT console_url FROM security_settings WHERE provider=?').get(id)?.console_url||(id==='acronis'&&acronis.configured?acronis.url.href:null),protectionVerified:false,apiConnected:false}))});
+      if(req.method==='POST' && url.pathname==='/api/security-provider'){
+        const input=await body(req);
+        if(typeof input.companyId!=='string'||!db.prepare('SELECT id FROM companies WHERE id=?').get(input.companyId))return reply(res,404,{error:'Company not found.'});
+        if(!['bitdefender','defender','acronis',''].includes(input.provider))return reply(res,400,{error:'Choose a supported security provider.'});
+        if(input.provider)db.prepare('INSERT INTO security_preferences(company_id,provider) VALUES (?,?) ON CONFLICT(company_id) DO UPDATE SET provider=excluded.provider').run(input.companyId,input.provider);
+        else db.prepare('DELETE FROM security_preferences WHERE company_id=?').run(input.companyId);
+        audit('security-provider-selected',input.companyId);return reply(res,200,{ok:true});
+      }
+      if(req.method==='POST' && url.pathname==='/api/security-settings'){
+        const input=await body(req);if(!['bitdefender','defender','acronis'].includes(input.provider))return reply(res,400,{error:'Choose a supported security provider.'});
+        if(typeof input.consoleUrl!=='string'||input.consoleUrl.length>1000)return reply(res,400,{error:'Enter a valid console URL.'});
+        let consoleUrl='';if(input.consoleUrl){try{const value=new URL(input.consoleUrl);if(value.protocol!=='https:'||value.username||value.password||value.search||value.hash)throw new Error();consoleUrl=value.href;}catch{return reply(res,400,{error:'Use an HTTPS console URL without credentials, query parameters, or fragments.'});}}
+        db.prepare('INSERT INTO security_settings(provider,console_url) VALUES (?,?) ON CONFLICT(provider) DO UPDATE SET console_url=excluded.console_url').run(input.provider,consoleUrl);
+        audit('security-console-configured',input.provider);return reply(res,200,{ok:true});
       }
       if(req.method==='GET' && url.pathname==='/api/backup-providers')return reply(res,200,{preferences:db.prepare('SELECT * FROM backup_preferences').all(),comet:{consoleUrl:db.prepare("SELECT value FROM backup_settings WHERE id='comet_console'").get()?.value||null,apiConnected:false},msp360:{consoleUrl:db.prepare("SELECT value FROM backup_settings WHERE id='msp360_console'").get()?.value||null,apiConnected:false}});
       if(req.method==='POST' && url.pathname==='/api/backup-provider'){
