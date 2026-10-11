@@ -46,6 +46,7 @@ def main():
     print('Authentication: OK')
     endpoints = ['/api/2/clients/' + urllib.parse.quote(client_id, safe=''),
                  '/api/resource_management/v4/resources', '/api/task_manager/v2/tasks']
+    resources = []
     for number, path in enumerate(endpoints, start=1):
         print('\nCheck', number, ('API client scope', 'Resource inventory', 'Task history')[number - 1])
         try:
@@ -57,11 +58,22 @@ def main():
                 value = json.loads(data)
                 print('HTTP:', response.status)
                 print(json.dumps(shape(value), indent=2))
+                if number == 2:
+                    resources = value.get('items', [])
                 if number == 3:
                     for task in value.get('items', [])[:12]:
                         enums = {key: item for key, item in {'type': task.get('type'), 'state': task.get('state'), 'result_code': task.get('result', {}).get('code')}.items() if isinstance(item, str) and re.fullmatch(r'[A-Za-z0-9_.:#-]{1,100}', item)}
                         print('Task type/state/result:', json.dumps(enums))
                         specific = task.get('context', {}).get('Specific')
+                        if task.get('type', '').upper() == 'D332948D-A7A9-4E07-B76C-253DCF6E17FB':
+                            references = set(re.findall(r'[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}', str(specific or ''), re.I))
+                            issuer = task.get('issuer', {}).get('id')
+                            if isinstance(issuer, str):
+                                references.add(issuer)
+                            references = {item.lower() for item in references}
+                            matches = [resource for resource in resources if any(isinstance(resource.get(key), str) and resource[key].lower() in references for key in ('id', 'external_id'))]
+                            print('Backup task matching resource count:', len(matches))
+
                         if isinstance(specific, str):
                             try:
                                 print('Parsed task Specific structure:', json.dumps(shape(json.loads(specific)), indent=2))
