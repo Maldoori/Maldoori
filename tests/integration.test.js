@@ -1,3 +1,4 @@
+import {directoryFixture} from './fixtures/directory.js';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import {gunzipSync} from 'node:zlib';
@@ -35,11 +36,12 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
         if(permissionFailure){socket.send(JSON.stringify({...output,result:'Access denied'}));return;}
         let commandScript=input.type===1?Buffer.from(input.cmds.split(' ').at(-1),'base64').toString('utf16le'):input.cmds;
         if(commandScript.includes('IO.Compression.GZipStream'))commandScript=gunzipSync(Buffer.from(commandScript.match(/FromBase64String\('([^']+)'\)/)[1],'base64')).toString('utf8');
-        assert.equal(input.reply,true);assert.equal(input.type,commandScript.includes('Win32_Processor')||commandScript.includes('WTSSendMessageW')||commandScript.includes('SkyBaseNetworkScan')?1:2);assert.equal(input.runAsUser,0);assert.equal(input.nodeids.length,1);
+        assert.equal(input.reply,true);assert.equal(input.type,commandScript.includes('Win32_Processor')||commandScript.includes('WTSSendMessageW')||commandScript.includes('SkyBaseNetworkScan')||commandScript.includes('Get-ADDomain')?1:2);assert.equal(input.runAsUser,0);assert.equal(input.nodeids.length,1);
         const marker=commandScript.match(/MALDOORI_[a-f0-9]{24}/)[0];
         if(commandScript.includes('Stop-Service'))mockServices[0].State='Stopped';
         if(commandScript.includes('Start-Service')||commandScript.includes('Restart-Service'))mockServices[0].State='Running';
         output={action:'msg',type:'runcommands',responseid:input.responseid,result:marker+JSON.stringify(commandFailure?{ok:false}:(commandScript.includes('SkyBaseNetworkScan')?{ok:true,scanned:254,devices:[{ip:'192.168.1.10',ports:[135,445,3389],ping:true,latency:2,mac:'02:11:22:33:44:55',hostname:'REAL-WINDOWS',scanner:true,responding:true},{ip:'192.168.1.20',ports:[9100],ping:true,latency:4,mac:'02:11:22:33:44:66',hostname:'',scanner:false,responding:true},{ip:'192.168.1.30',ports:[],ping:false,latency:null,mac:'02:11:22:33:44:77',hostname:'',scanner:false,responding:false}]}:(commandScript.includes('WTSSendMessageW')?{ok:true,code:'accepted'}:(commandScript.includes('Win32_Processor')?{ok:true,cpu:42,memoryTotal:16000,memoryFree:4000,diskTotal:100000,diskFree:45000,diskName:'C:'}:{ok:true,services:mockServices}))))+marker};
+        if(commandScript.includes('Get-ADDomain'))output.result=marker+JSON.stringify(directoryFixture)+marker;
       }
       socket.send(JSON.stringify(output));
     });
@@ -243,6 +245,18 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       assert.equal(new URL(page.url()).hash,'#network');await page.locator('#network-device-list').getByText('Office printer',{exact:true}).waitFor();
       await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-network-scan.png',fullPage:true});
       await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});
+      await page.locator('[data-page="directory"]').click();
+      await page.locator('#directory-company').selectOption((await api('inventory')).data.devices.find(d=>d.id==='node//original-device').companyId);
+      await page.locator('#directory-sync').click();
+      await page.locator('#directory-table').getByText('Jane Smith',{exact:true}).waitFor();
+      assert.equal(await page.locator('#directory-table tbody tr').count(),2);
+      await page.locator('#directory-search').fill('Sales');assert.equal(await page.locator('#directory-table tbody tr').count(),1);
+      await page.locator('#directory-search').fill('');await page.locator('[data-directory-tab="groups"]').click();
+      await page.locator('[data-directory-members]').click();await page.locator('.directory-members').getByText('CN=Jane Smith,OU=IT,DC=company,DC=local',{exact:true}).waitFor();await page.locator('#modal [data-close]').click();
+      await page.locator('[data-directory-tab="ous"]').click();await page.locator('#directory-table').getByText('IT department',{exact:true}).waitFor();
+      await page.locator('[data-directory-tab="users"]').click();await page.reload();await page.locator('#directory-table').getByText('Jane Smith',{exact:true}).waitFor();assert.equal(new URL(page.url()).hash,'#directory');
+      await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-active-directory.png',fullPage:true});
+      await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});
       await page.locator('[data-page="patches"]').click();
       await page.locator('#patch-list').getByText('Edited KB update',{exact:true}).waitFor();
       await page.reload();await page.locator('#patches-panel').waitFor({state:'visible'});
@@ -387,6 +401,10 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       assert.deepEqual(errors,[]);
     } finally { await browser.close(); }
   }
+  assert.equal((await api('active-directory-sync',{companyId,nodeId:'node//original-device'})).status,404);
+  assert.equal((await api('active-directory?id=missing')).status,404);
+  const directoryState=(await api('active-directory?companyId=mesh%2F%2Fexisting-group')).data;
+  assert.equal(directoryState.status,'completed');assert.equal(directoryState.result.users.length,2);
   assert.equal((await api('network-scan',{locationId:'location:mesh//existing-group',nodeId:'node//original-device',cidr:'8.8.8.0/24'})).status,400);
   assert.equal((await api('network-scan',{locationId:branchId,nodeId:'node//original-device',cidr:'192.168.1.0/24'})).status,404);
   const scanState=(await api('network-scans?locationId='+encodeURIComponent('location:mesh//existing-group'))).data;

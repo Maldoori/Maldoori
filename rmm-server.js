@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {directoryCommand,parseDirectory} from './lib/active-directory.js';
 import {networkRange,networkScanCommand,parseNetworkScan} from './lib/network-scan.js';
 import {patchNotice,notificationCommand,notificationAccepted} from './lib/patch-notifications.js';
 import {initializePatches,savePatch} from './lib/patches.js';
@@ -49,6 +50,9 @@ initializePatches(db);
 db.exec("CREATE TABLE IF NOT EXISTS patch_notifications(id INTEGER PRIMARY KEY,patch_id TEXT NOT NULL REFERENCES patches(id) ON DELETE CASCADE,node_id TEXT NOT NULL,message TEXT NOT NULL,at TEXT NOT NULL)");
 const notificationBusy=new Set();
 const networkBusy=new Set();
+const directoryBusy=new Set();
+db.exec("CREATE TABLE IF NOT EXISTS directory_syncs(id TEXT PRIMARY KEY,company_id TEXT NOT NULL REFERENCES companies(id),node_id TEXT NOT NULL,source_name TEXT NOT NULL,at TEXT NOT NULL,status TEXT NOT NULL,result TEXT NOT NULL,error TEXT NOT NULL)");
+db.exec("UPDATE directory_syncs SET status='failed',error='Server restarted before sync completion. Sync again to retrieve a fresh snapshot.' WHERE status='running'");
 db.exec("CREATE TABLE IF NOT EXISTS network_scans(id TEXT PRIMARY KEY,company_id TEXT NOT NULL REFERENCES companies(id),location_id TEXT NOT NULL REFERENCES locations(id),node_id TEXT NOT NULL,source_name TEXT NOT NULL,source_os TEXT NOT NULL,cidr TEXT NOT NULL,at TEXT NOT NULL,status TEXT NOT NULL,result TEXT NOT NULL,error TEXT NOT NULL); CREATE TABLE IF NOT EXISTS network_labels(scan_id TEXT NOT NULL REFERENCES network_scans(id) ON DELETE CASCADE,ip TEXT NOT NULL,type TEXT NOT NULL,hostname TEXT NOT NULL,PRIMARY KEY(scan_id,ip))");
 db.exec("UPDATE network_scans SET status='failed',error='Server restarted before scan completion. Check the agent before retrying.' WHERE status='running'");
 
@@ -64,7 +68,7 @@ function syncAcronis(){
 }
 const serviceBusy = new Set();
 async function sendPatchNotice(device,patch,notice){
- if(networkBusy.has(device.id)||notificationBusy.has(device.id)||telemetryBusy.has(device.id)||serviceBusy.has(device.id))throw Object.assign(new Error('A command is running on this computer. Wait before retrying.'),{status:409});
+ if(directoryBusy.has(device.id)||networkBusy.has(device.id)||notificationBusy.has(device.id)||telemetryBusy.has(device.id)||serviceBusy.has(device.id))throw Object.assign(new Error('A command is running on this computer. Wait before retrying.'),{status:409});
  notificationBusy.add(device.id);const command=notificationCommand(notice);audit('patch-notification-requested',device.id);
  try{const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,notification:true});const acceptance=notificationAccepted(output.result,command.marker);
   const at=new Date().toISOString();db.prepare('INSERT INTO patch_notifications(patch_id,node_id,message,at) VALUES (?,?,?,?)').run(patch.id,device.id,notice,at);audit('patch-notification-accepted',device.id);return {...acceptance,userReadVerified:false,at};
@@ -186,7 +190,7 @@ const server = http.createServer(async (req, res) => {
         if(!device)return reply(res,404,{error:'Computer not found.'});
         if(!device.online)return reply(res,409,{error:'Computer is offline.'});
         if(!device.windows)return reply(res,400,{error:'Metrics currently support Windows computers.'});
-        if(networkBusy.has(device.id)||notificationBusy.has(device.id))return reply(res,409,{error:'A network scan or user notification is running on this computer.'});
+        if(directoryBusy.has(device.id)||networkBusy.has(device.id)||notificationBusy.has(device.id))return reply(res,409,{error:'A directory sync, network scan, or user notification is running on this computer.'});
         const cached=telemetryCache.get(device.id);
         if(cached&&Date.now()-Date.parse(cached.checkedAt)<30000)return reply(res,200,cached);
         if(!telemetryBusy.has(device.id)){
@@ -216,6 +220,25 @@ const server = http.createServer(async (req, res) => {
         }
         await synchronize();return reply(res,200,{ok:true});
       }
+      if(req.method==='GET' && url.pathname==='/api/active-directory'){
+        const id=url.searchParams.get('id'),company=url.searchParams.get('companyId');
+        const sync=id?db.prepare('SELECT * FROM directory_syncs WHERE id=?').get(id):db.prepare('SELECT * FROM directory_syncs WHERE company_id=? ORDER BY at DESC LIMIT 1').get(company||'');
+        if(id&&!sync)return reply(res,404,{error:'Directory sync not found.'});
+        return reply(res,200,sync?{...sync,result:JSON.parse(sync.result)}:{status:'empty',result:{users:[],groups:[],ous:[]}});
+      }
+      if(req.method==='POST' && url.pathname==='/api/active-directory-sync'){
+        const input=await body(req);if(typeof input.companyId!=='string'||typeof input.nodeId!=='string')return reply(res,400,{error:'Choose a company and directory agent.'});
+        if(db.prepare("SELECT id FROM directory_syncs WHERE status='running'").get())return reply(res,409,{error:'An Active Directory sync is already running.'});
+        await synchronize();if(snapshot.error)return reply(res,502,{error:snapshot.error});
+        const device=snapshot.devices.find(d=>d.id===input.nodeId&&d.companyId===input.companyId);
+        if(!device)return reply(res,404,{error:'Choose an agent belonging to this company.'});
+        if(!device.online||!device.windows)return reply(res,409,{error:'The directory agent must be an online Windows computer.'});
+        if(directoryBusy.has(device.id)||networkBusy.has(device.id)||notificationBusy.has(device.id)||serviceBusy.has(device.id))return reply(res,409,{error:'A command is already running on this agent.'});
+        const id=randomBytes(16).toString('hex'),command=directoryCommand();directoryBusy.add(device.id);
+        db.prepare("INSERT INTO directory_syncs VALUES (?,?,?,?,?,'running','{}','')").run(id,input.companyId,device.id,device.name,new Date().toISOString());audit('active-directory-sync-started',input.companyId);
+        void (async()=>{try{if(telemetryBusy.has(device.id))await telemetryBusy.get(device.id).catch(()=>{});const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,directory:true});const result=parseDirectory(output.result,command.marker);db.prepare("UPDATE directory_syncs SET status='completed',result=? WHERE id=?").run(JSON.stringify(result),id);audit('active-directory-sync-completed',id);}catch(error){db.prepare("UPDATE directory_syncs SET status='failed',error=? WHERE id=?").run(error.status||error.message.startsWith('MeshCentral')||error.message.startsWith('Active Directory')?error.message:'Active Directory sync failed. Check the agent and security software alerts.',id);}finally{directoryBusy.delete(device.id);}})();
+        return reply(res,202,{id,status:'running'});
+      }
       if(req.method==='GET' && url.pathname==='/api/network-scans'){
         const requested=url.searchParams.get('id'),site=url.searchParams.get('locationId');
         const scan=requested?db.prepare('SELECT * FROM network_scans WHERE id=?').get(requested):site?db.prepare('SELECT * FROM network_scans WHERE location_id=? ORDER BY at DESC LIMIT 1').get(site):db.prepare('SELECT * FROM network_scans ORDER BY at DESC LIMIT 1').get();
@@ -229,7 +252,7 @@ const server = http.createServer(async (req, res) => {
         await synchronize();if(snapshot.error)return reply(res,502,{error:snapshot.error});
         const device=snapshot.devices.find(d=>d.id===input.nodeId&&d.companyId===site.company_id&&d.locationId===site.id);if(!device)return reply(res,404,{error:'Choose an agent belonging to this customer site.'});
         if(!device.online||!device.windows)return reply(res,409,{error:'The scan agent must be an online Windows computer.'});
-        if(networkBusy.has(device.id)||notificationBusy.has(device.id)||serviceBusy.has(device.id))return reply(res,409,{error:'A command is already running on the scan agent.'});
+        if(directoryBusy.has(device.id)||networkBusy.has(device.id)||notificationBusy.has(device.id)||serviceBusy.has(device.id))return reply(res,409,{error:'A command is already running on the scan agent.'});
         const command=networkScanCommand(range),id=randomBytes(16).toString('hex');networkBusy.add(device.id);
         db.prepare("INSERT INTO network_scans VALUES (?,?,?,?,?,?,?,?, 'running','[]','')").run(id,site.company_id,site.id,device.id,device.name,device.os,range.cidr,new Date().toISOString());audit('network-scan-started',site.company_id+':'+range.cidr);
         void (async()=>{try{if(telemetryBusy.has(device.id))await telemetryBusy.get(device.id).catch(()=>{});const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,scan:true});const devices=parseNetworkScan(output.result,command.marker,range);db.prepare("UPDATE network_scans SET status='completed',result=? WHERE id=?").run(JSON.stringify(devices),id);audit('network-scan-completed',id);}catch(error){const safe=error.status||error.message.startsWith('MeshCentral')||error.message.startsWith('Network scan');db.prepare("UPDATE network_scans SET status='failed',error=? WHERE id=?").run(safe?error.message:'Network scan failed. Check the Windows agent, permissions, and security software alerts.',id);}finally{networkBusy.delete(device.id);}})();
@@ -398,7 +421,7 @@ const server = http.createServer(async (req, res) => {
         if(!device) return reply(res,404,{error:'Device is not accessible to this integration account.'});
         if(!device.online) return reply(res,409,{error:'Device is offline.'});
         if(!device.windows) return reply(res,400,{error:'Windows service management requires a Windows agent.'});
-        if(networkBusy.has(device.id)||notificationBusy.has(device.id))return reply(res,409,{error:'A network scan or user notification is running on this device.'});
+        if(directoryBusy.has(device.id)||networkBusy.has(device.id)||notificationBusy.has(device.id))return reply(res,409,{error:'A directory sync, network scan, or user notification is running on this device.'});
         if(serviceBusy.has(device.id)) return reply(res,409,{error:'A service request is already running on this device.'});
         const action=url.pathname==='/api/services'?'list':input.action;
         if(url.pathname==='/api/service-action' && !['start','stop','restart'].includes(action)) return reply(res,400,{error:'Choose start, stop, or restart.'});
