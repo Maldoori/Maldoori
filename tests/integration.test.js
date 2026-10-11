@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
+import {gunzipSync} from 'node:zlib';
 import assert from 'node:assert/strict';
 import https from 'node:https';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -32,12 +33,13 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       if(input.action==='createInviteLink') output.url=`https://localhost:${upstream.address().port}/agentinvite?c=test-invitation&group=${encodeURIComponent(input.meshid)}`;
       if(input.action==='runcommands'){
         if(permissionFailure){socket.send(JSON.stringify({...output,result:'Access denied'}));return;}
-        const commandScript=input.type===1?Buffer.from(input.cmds.split(' ').at(-1),'base64').toString('utf16le'):input.cmds;
-        assert.equal(input.reply,true);assert.equal(input.type,commandScript.includes('Win32_Processor')||commandScript.includes('WTSSendMessageW')?1:2);assert.equal(input.runAsUser,0);assert.equal(input.nodeids.length,1);
+        let commandScript=input.type===1?Buffer.from(input.cmds.split(' ').at(-1),'base64').toString('utf16le'):input.cmds;
+        if(commandScript.includes('IO.Compression.GZipStream'))commandScript=gunzipSync(Buffer.from(commandScript.match(/FromBase64String\('([^']+)'\)/)[1],'base64')).toString('utf8');
+        assert.equal(input.reply,true);assert.equal(input.type,commandScript.includes('Win32_Processor')||commandScript.includes('WTSSendMessageW')||commandScript.includes('SkyBaseNetworkScan')?1:2);assert.equal(input.runAsUser,0);assert.equal(input.nodeids.length,1);
         const marker=commandScript.match(/MALDOORI_[a-f0-9]{24}/)[0];
         if(commandScript.includes('Stop-Service'))mockServices[0].State='Stopped';
         if(commandScript.includes('Start-Service')||commandScript.includes('Restart-Service'))mockServices[0].State='Running';
-        output={action:'msg',type:'runcommands',responseid:input.responseid,result:marker+JSON.stringify(commandFailure?{ok:false}:(commandScript.includes('WTSSendMessageW')?{ok:true,code:'accepted'}:(commandScript.includes('Win32_Processor')?{ok:true,cpu:42,memoryTotal:16000,memoryFree:4000,diskTotal:100000,diskFree:45000,diskName:'C:'}:{ok:true,services:mockServices})))+marker};
+        output={action:'msg',type:'runcommands',responseid:input.responseid,result:marker+JSON.stringify(commandFailure?{ok:false}:(commandScript.includes('SkyBaseNetworkScan')?{ok:true,scanned:254,devices:[{ip:'192.168.1.10',ports:[135,445,3389],ping:true,latency:2,mac:'02:11:22:33:44:55',hostname:'REAL-WINDOWS',scanner:true,responding:true},{ip:'192.168.1.20',ports:[9100],ping:true,latency:4,mac:'02:11:22:33:44:66',hostname:'',scanner:false,responding:true},{ip:'192.168.1.30',ports:[],ping:false,latency:null,mac:'02:11:22:33:44:77',hostname:'',scanner:false,responding:false}]}:(commandScript.includes('WTSSendMessageW')?{ok:true,code:'accepted'}:(commandScript.includes('Win32_Processor')?{ok:true,cpu:42,memoryTotal:16000,memoryFree:4000,diskTotal:100000,diskFree:45000,diskName:'C:'}:{ok:true,services:mockServices}))))+marker};
       }
       socket.send(JSON.stringify(output));
     });
@@ -226,6 +228,21 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('#provider-choice-form button.primary').click();
       await page.locator('#comet-companies').getByText('New company',{exact:true}).waitFor({state:'attached'});
       await page.locator('#backup-provider-view').selectOption('acronis');
+      await page.locator('[data-page="network"]').click();
+      await page.locator('#network-site').selectOption('location:mesh//existing-group');
+      await page.locator('#network-cidr').fill('192.168.1.0/24');
+      await page.locator('#start-network-scan').click();
+      await page.waitForFunction(()=>document.querySelector('#network-found').textContent==='3 found');
+      await page.locator('[data-network-label="192.168.1.20"]').click();
+      await page.locator('#network-label-form select').selectOption('printer');await page.locator('#network-label-form input[name="hostname"]').fill('Office printer');
+      await page.locator('#network-label-form button.primary').click();
+      await page.locator('#network-device-list').getByText('Office printer',{exact:true}).waitFor();
+      await page.locator('[data-network-type="printer"]').click();assert.equal(await page.locator('#network-device-list tbody tr').count(),1);
+      await page.locator('[data-network-type="all"]').click();await page.locator('#network-map-view').click();assert.equal(await page.locator('.network-map-grid>div').count(),3);
+      await page.locator('#network-list-view').click();await page.reload();await page.locator('#network-panel').waitFor({state:'visible'});
+      assert.equal(new URL(page.url()).hash,'#network');await page.locator('#network-device-list').getByText('Office printer',{exact:true}).waitFor();
+      await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-network-scan.png',fullPage:true});
+      await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});
       await page.locator('[data-page="patches"]').click();
       await page.locator('#patch-list').getByText('Edited KB update',{exact:true}).waitFor();
       await page.reload();await page.locator('#patches-panel').waitFor({state:'visible'});
@@ -370,6 +387,10 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       assert.deepEqual(errors,[]);
     } finally { await browser.close(); }
   }
+  assert.equal((await api('network-scan',{locationId:'location:mesh//existing-group',nodeId:'node//original-device',cidr:'8.8.8.0/24'})).status,400);
+  assert.equal((await api('network-scan',{locationId:branchId,nodeId:'node//original-device',cidr:'192.168.1.0/24'})).status,404);
+  const scanState=(await api('network-scans?locationId='+encodeURIComponent('location:mesh//existing-group'))).data;
+  if(process.env.BROWSER_TEST_MODULE){assert.equal(scanState.result.length,3);assert.equal(scanState.labels[0].type,'printer');}
   assert.equal((await api('patch-notify',{patchId,nodeId:'node//original-device',windowText:'Tomorrow 6 PM Central'})).status,400);
   assert.equal((await api('patch-notify',{patchId,nodeId:'node//original-device',windowText:'Tomorrow 6 PM Central',confirm:true})).status,400);
   assert.equal((await api('patch-notify',{patchId,nodeId:'node//branch-server',windowText:'Tomorrow 6 PM Central',confirm:true})).status,409);

@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {networkRange,networkScanCommand,parseNetworkScan} from './lib/network-scan.js';
 import {patchNotice,notificationCommand,notificationAccepted} from './lib/patch-notifications.js';
 import {initializePatches,savePatch} from './lib/patches.js';
 import { readFile, mkdir, stat } from 'node:fs/promises';
@@ -47,6 +48,10 @@ db.exec("CREATE TABLE IF NOT EXISTS security_preferences(company_id TEXT PRIMARY
 initializePatches(db);
 db.exec("CREATE TABLE IF NOT EXISTS patch_notifications(id INTEGER PRIMARY KEY,patch_id TEXT NOT NULL REFERENCES patches(id) ON DELETE CASCADE,node_id TEXT NOT NULL,message TEXT NOT NULL,at TEXT NOT NULL)");
 const notificationBusy=new Set();
+const networkBusy=new Set();
+db.exec("CREATE TABLE IF NOT EXISTS network_scans(id TEXT PRIMARY KEY,company_id TEXT NOT NULL REFERENCES companies(id),location_id TEXT NOT NULL REFERENCES locations(id),node_id TEXT NOT NULL,source_name TEXT NOT NULL,source_os TEXT NOT NULL,cidr TEXT NOT NULL,at TEXT NOT NULL,status TEXT NOT NULL,result TEXT NOT NULL,error TEXT NOT NULL); CREATE TABLE IF NOT EXISTS network_labels(scan_id TEXT NOT NULL REFERENCES network_scans(id) ON DELETE CASCADE,ip TEXT NOT NULL,type TEXT NOT NULL,hostname TEXT NOT NULL,PRIMARY KEY(scan_id,ip))");
+db.exec("UPDATE network_scans SET status='failed',error='Server restarted before scan completion. Check the agent before retrying.' WHERE status='running'");
+
 db.exec("CREATE TABLE IF NOT EXISTS patch_notice_jobs(id TEXT PRIMARY KEY,patch_id TEXT NOT NULL REFERENCES patches(id) ON DELETE CASCADE,company_id TEXT NOT NULL REFERENCES companies(id),at TEXT NOT NULL,status TEXT NOT NULL); CREATE TABLE IF NOT EXISTS patch_notice_targets(job_id TEXT NOT NULL REFERENCES patch_notice_jobs(id) ON DELETE CASCADE,node_id TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,detail TEXT NOT NULL,PRIMARY KEY(job_id,node_id))");
 // Do not resend notices after a restart: a previous delivery may have succeeded.
 db.exec("UPDATE patch_notice_targets SET status='uncertain',detail='Server restarted before completion. Check delivery before retrying.' WHERE status IN ('queued','sending'); UPDATE patch_notice_jobs SET status='completed' WHERE status='running'");
@@ -59,7 +64,7 @@ function syncAcronis(){
 }
 const serviceBusy = new Set();
 async function sendPatchNotice(device,patch,notice){
- if(notificationBusy.has(device.id)||telemetryBusy.has(device.id)||serviceBusy.has(device.id))throw Object.assign(new Error('A command is running on this computer. Wait before retrying.'),{status:409});
+ if(networkBusy.has(device.id)||notificationBusy.has(device.id)||telemetryBusy.has(device.id)||serviceBusy.has(device.id))throw Object.assign(new Error('A command is running on this computer. Wait before retrying.'),{status:409});
  notificationBusy.add(device.id);const command=notificationCommand(notice);audit('patch-notification-requested',device.id);
  try{const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,notification:true});const acceptance=notificationAccepted(output.result,command.marker);
   const at=new Date().toISOString();db.prepare('INSERT INTO patch_notifications(patch_id,node_id,message,at) VALUES (?,?,?,?)').run(patch.id,device.id,notice,at);audit('patch-notification-accepted',device.id);return {...acceptance,userReadVerified:false,at};
@@ -181,7 +186,7 @@ const server = http.createServer(async (req, res) => {
         if(!device)return reply(res,404,{error:'Computer not found.'});
         if(!device.online)return reply(res,409,{error:'Computer is offline.'});
         if(!device.windows)return reply(res,400,{error:'Metrics currently support Windows computers.'});
-        if(notificationBusy.has(device.id))return reply(res,409,{error:'A user notification is running on this computer.'});
+        if(networkBusy.has(device.id)||notificationBusy.has(device.id))return reply(res,409,{error:'A network scan or user notification is running on this computer.'});
         const cached=telemetryCache.get(device.id);
         if(cached&&Date.now()-Date.parse(cached.checkedAt)<30000)return reply(res,200,cached);
         if(!telemetryBusy.has(device.id)){
@@ -210,6 +215,30 @@ const server = http.createServer(async (req, res) => {
           audit('computer-removed',device.id);
         }
         await synchronize();return reply(res,200,{ok:true});
+      }
+      if(req.method==='GET' && url.pathname==='/api/network-scans'){
+        const requested=url.searchParams.get('id'),site=url.searchParams.get('locationId');
+        const scan=requested?db.prepare('SELECT * FROM network_scans WHERE id=?').get(requested):site?db.prepare('SELECT * FROM network_scans WHERE location_id=? ORDER BY at DESC LIMIT 1').get(site):db.prepare('SELECT * FROM network_scans ORDER BY at DESC LIMIT 1').get();
+        if(requested&&!scan)return reply(res,404,{error:'Network scan not found.'});
+        return reply(res,200,scan?{...scan,result:JSON.parse(scan.result),labels:db.prepare('SELECT ip,type,hostname FROM network_labels WHERE scan_id=?').all(scan.id)}:{status:'empty',result:[],labels:[]});
+      }
+      if(req.method==='POST' && url.pathname==='/api/network-scan'){
+        const input=await body(req),range=networkRange(input.cidr);if(typeof input.locationId!=='string'||typeof input.nodeId!=='string')return reply(res,400,{error:'Choose a customer site and scan agent.'});
+        const site=db.prepare('SELECT * FROM locations WHERE id=?').get(input.locationId);if(!site)return reply(res,404,{error:'Site not found.'});
+        if(db.prepare("SELECT id FROM network_scans WHERE status='running'").get())return reply(res,409,{error:'A network scan is already running. Wait for it to finish.'});
+        await synchronize();if(snapshot.error)return reply(res,502,{error:snapshot.error});
+        const device=snapshot.devices.find(d=>d.id===input.nodeId&&d.companyId===site.company_id&&d.locationId===site.id);if(!device)return reply(res,404,{error:'Choose an agent belonging to this customer site.'});
+        if(!device.online||!device.windows)return reply(res,409,{error:'The scan agent must be an online Windows computer.'});
+        if(networkBusy.has(device.id)||notificationBusy.has(device.id)||serviceBusy.has(device.id))return reply(res,409,{error:'A command is already running on the scan agent.'});
+        const command=networkScanCommand(range),id=randomBytes(16).toString('hex');networkBusy.add(device.id);
+        db.prepare("INSERT INTO network_scans VALUES (?,?,?,?,?,?,?,?, 'running','[]','')").run(id,site.company_id,site.id,device.id,device.name,device.os,range.cidr,new Date().toISOString());audit('network-scan-started',site.company_id+':'+range.cidr);
+        void (async()=>{try{if(telemetryBusy.has(device.id))await telemetryBusy.get(device.id).catch(()=>{});const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,scan:true});const devices=parseNetworkScan(output.result,command.marker,range);db.prepare("UPDATE network_scans SET status='completed',result=? WHERE id=?").run(JSON.stringify(devices),id);audit('network-scan-completed',id);}catch(error){const safe=error.status||error.message.startsWith('MeshCentral')||error.message.startsWith('Network scan');db.prepare("UPDATE network_scans SET status='failed',error=? WHERE id=?").run(safe?error.message:'Network scan failed. Check the Windows agent, permissions, and security software alerts.',id);}finally{networkBusy.delete(device.id);}})();
+        return reply(res,202,{ok:true,id,cidr:range.cidr});
+      }
+      if(req.method==='POST' && url.pathname==='/api/network-label'){
+        const input=await body(req);if(typeof input.scanId!=='string'||typeof input.ip!=='string')return reply(res,400,{error:'Choose a discovered device.'});const scan=db.prepare('SELECT * FROM network_scans WHERE id=?').get(input.scanId);if(!scan||scan.status!=='completed'||!JSON.parse(scan.result).some(d=>d.ip===input.ip))return reply(res,404,{error:'Discovered device not found.'});
+        if(!['unknown','workstation','server','printer','phone','network'].includes(input.type)||typeof input.hostname!=='string'||input.hostname.length>120||/[\x00-\x1f]/.test(input.hostname))return reply(res,400,{error:'Enter a valid device label and type.'});
+        db.prepare('INSERT INTO network_labels VALUES (?,?,?,?) ON CONFLICT(scan_id,ip) DO UPDATE SET type=excluded.type,hostname=excluded.hostname').run(scan.id,input.ip,input.type,input.hostname.trim());audit('network-device-labeled',scan.id+':'+input.ip);return reply(res,200,{ok:true});
       }
       if(req.method==='GET' && url.pathname==='/api/patches')return reply(res,200,{patches:db.prepare('SELECT * FROM patches ORDER BY title').all(),rollouts:db.prepare('SELECT * FROM patch_rollouts').all().filter(r=>snapshot.devices.some(d=>d.id===r.node_id)),deploymentConnected:false,jobs:db.prepare('SELECT * FROM patch_notice_jobs ORDER BY at DESC LIMIT 100').all(),notifications:db.prepare('SELECT patch_id,node_id,at FROM patch_notifications ORDER BY at DESC LIMIT 1000').all().filter(n=>snapshot.devices.some(d=>d.id===n.node_id))});
       if(req.method==='POST' && url.pathname==='/api/patch-save'){const input=await body(req);const id=savePatch(db,input);audit('patch-catalog-saved',id);return reply(res,200,{ok:true,id});}
@@ -369,7 +398,7 @@ const server = http.createServer(async (req, res) => {
         if(!device) return reply(res,404,{error:'Device is not accessible to this integration account.'});
         if(!device.online) return reply(res,409,{error:'Device is offline.'});
         if(!device.windows) return reply(res,400,{error:'Windows service management requires a Windows agent.'});
-        if(notificationBusy.has(device.id))return reply(res,409,{error:'A user notification is running on this device.'});
+        if(networkBusy.has(device.id)||notificationBusy.has(device.id))return reply(res,409,{error:'A network scan or user notification is running on this device.'});
         if(serviceBusy.has(device.id)) return reply(res,409,{error:'A service request is already running on this device.'});
         const action=url.pathname==='/api/services'?'list':input.action;
         if(url.pathname==='/api/service-action' && !['start','stop','restart'].includes(action)) return reply(res,400,{error:'Choose start, stop, or restart.'});
