@@ -147,11 +147,17 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('.device-card').filter({has:page.getByText('REAL-WINDOWS',{exact:true})}).locator('[data-metric-value="cpu"]').getByText('42%',{exact:true}).waitFor();
       assert.equal(await page.locator('[data-remote]').count(),3);assert.equal(await page.locator('[data-remote]:enabled').count(),1);
       await page.locator('[data-page="backups"]').click();
+      assert.equal(new URL(page.url()).hash,'#backups');
+      await page.reload();
+      await page.locator('#backups-panel').waitFor({state:'visible'});
+      assert.equal(await page.locator('#devices-panel').isVisible(),false);
       await page.getByText('Connection settings',{exact:true}).click();
       await page.locator('#acronis-connect').click();
       await page.waitForFunction(()=>document.querySelector('#acronis-status').textContent.includes('not configured'));
       assert.equal(await page.locator('#acronis-console').isVisible(),false);
       await page.locator('[data-page="overview"]').click();
+      await page.goBack();await page.locator('#backups-panel').waitFor({state:'visible'});
+      await page.goForward();await page.locator('#devices-panel').waitFor({state:'visible'});
       await page.locator('[data-invite]').first().click();
       await page.locator('#add-device-form .primary').click();
       await page.getByRole('heading',{name:'Enroll a Windows computer'}).waitFor();

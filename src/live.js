@@ -1,6 +1,8 @@
 const $ = s => document.querySelector(s);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let inventory = {groups:[],customers:[],companies:[],locations:[],deviceGroups:[],devices:[]}, refreshing = false, page = 'overview';
+const pages=new Set(['overview','devices','companies','groups','backups']);
+const pageFromUrl=()=>pages.has(location.hash.slice(1))?location.hash.slice(1):'overview';
+let inventory = {groups:[],customers:[],companies:[],locations:[],deviceGroups:[],devices:[]}, refreshing = false, page = pageFromUrl();
 async function api(path, data) {
   const response = await fetch('/api/' + path, {method:data === undefined ? 'GET' : 'POST',headers:data === undefined ? {} : {'Content-Type':'application/json'},body:data === undefined ? undefined : JSON.stringify(data)});
   const value = await response.json();
@@ -15,8 +17,9 @@ function devicesFiltered() {
   const company=$('#company-filter').value,location=$('#location-filter').value,group=$('#group-filter').value,status=$('#status-filter').value,query=$('#search').value.toLowerCase();
   return inventory.devices.filter(d => (!company || d.companyId===company) && (!location || d.locationId===location) && (!group || d.groupId===group) && (!status || d.online===(status==='online')) && `${d.name} ${d.company} ${d.location} ${d.groupName} ${d.os}`.toLowerCase().includes(query));
 }
-function changePage(value) {
-  page=value;
+function changePage(value,updateUrl=false) {
+  page=pages.has(value)?value:'overview';
+  if(updateUrl&&location.hash!=='#'+page){const url=new URL(location.href);url.hash=page;history.pushState(null,'',url);}
   document.querySelectorAll('[data-page]').forEach(b=>{b.classList.toggle('active',b.dataset.page===page);b.setAttribute('aria-current',b.dataset.page===page?'page':'false');});
   $('#companies-panel').hidden=!['overview','companies'].includes(page);
   $('#devices-panel').hidden=!['overview','devices'].includes(page);
@@ -167,5 +170,7 @@ $('#logout').onclick=async()=>{try{await api('logout',{});$('#modal').close();$(
 $('#sync').onclick=async()=>{$('#sync').disabled=true;try{await api('sync',{});message('');}catch(error){message(error.message);}finally{await refresh();$('#sync').disabled=false;}};
 $('#search').oninput=render;['#company-filter','#location-filter','#group-filter','#status-filter'].forEach(id=>$(id).onchange=render);
 $('#add-customer').onclick=()=>{showDialog(`<h2>Add customer</h2><form id="customer-form"><label>Customer name<input name="name" required maxlength="120" placeholder="Client or customer contact"></label>${actions('Save customer')}</form>`);submitForm('#customer-form','customers');};
-$('#add-company').onclick=companyForm;$('#add-device').onclick=()=>enroll($('#company-filter').value,$('#location-filter').value,$('#group-filter').value);$('#add-location').onclick=()=>locationForm();$('#add-group').onclick=()=>groupForm();bind('[data-page]',b=>changePage(b.dataset.page));
+$('#add-company').onclick=companyForm;$('#add-device').onclick=()=>enroll($('#company-filter').value,$('#location-filter').value,$('#group-filter').value);$('#add-location').onclick=()=>locationForm();$('#add-group').onclick=()=>groupForm();bind('[data-page]',b=>changePage(b.dataset.page,true));
+window.addEventListener('popstate',()=>changePage(pageFromUrl()));
+window.addEventListener('hashchange',()=>changePage(pageFromUrl()));
 await refresh();setInterval(()=>{if(!$('#workspace').hidden)refresh();},30000);
