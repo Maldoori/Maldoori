@@ -210,8 +210,8 @@ const server = http.createServer(async (req, res) => {
         if(!device.windows)return reply(res,400,{error:'Notifications currently support Windows computers.'});
         if(notificationBusy.has(device.id)||telemetryBusy.has(device.id)||serviceBusy.has(device.id))return reply(res,409,{error:'A command is running on this computer. Wait for it to finish before sending a notice.'});
         notificationBusy.add(device.id);const command=notificationCommand(notice);audit('patch-notification-requested',device.id);
-        try{const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,notification:true});notificationAccepted(output.result,command.marker);
-          const at=new Date().toISOString();db.prepare('INSERT INTO patch_notifications(patch_id,node_id,message,at) VALUES (?,?,?,?)').run(patch.id,device.id,notice,at);audit('patch-notification-accepted',device.id);return reply(res,200,{ok:true,accepted:true,userReadVerified:false,at});
+        try{const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,notification:true});const acceptance=notificationAccepted(output.result,command.marker);
+          const at=new Date().toISOString();db.prepare('INSERT INTO patch_notifications(patch_id,node_id,message,at) VALUES (?,?,?,?)').run(patch.id,device.id,notice,at);audit('patch-notification-accepted',device.id);return reply(res,200,{ok:true,...acceptance,userReadVerified:false,at});
         }finally{notificationBusy.delete(device.id);}
       }
       if(req.method==='POST' && url.pathname==='/api/patch-plan'){
