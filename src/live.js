@@ -3,7 +3,7 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp
 const pages=new Set(['overview','devices','companies','groups','backups']);
 const pageFromUrl=()=>pages.has(location.hash.slice(1))?location.hash.slice(1):'overview';
 let inventory = {groups:[],customers:[],companies:[],locations:[],deviceGroups:[],devices:[]}, refreshing = false, page = pageFromUrl();
-const dashboardWidgets=[{id:'dashboard-stats',name:'Inventory totals'},{id:'dashboard-endpoints',name:'Endpoint status'},{id:'dashboard-coverage',name:'Protection overview'},{id:'dashboard-alerts',name:'Priority alerts'},{id:'dashboard-inventory',name:'Inventory table'},{id:'dashboard-quick',name:'Quick tools'},{id:'companies-panel',name:'Customers & companies'},{id:'devices-panel',name:'Computer cards and live metrics'},{id:'backups-panel',name:'Acronis backups'}];
+const dashboardWidgets=[{id:'dashboard-stats',name:'Inventory totals'},{id:'dashboard-endpoints',name:'Endpoint status'},{id:'dashboard-coverage',name:'Protection overview'},{id:'dashboard-alerts',name:'Priority alerts'},{id:'dashboard-inventory',name:'Inventory table'},{id:'dashboard-quick',name:'Quick tools'},{id:'companies-panel',name:'Customers & companies'},{id:'devices-panel',name:'Computer cards and live metrics'},{id:'backups-panel',name:'Backup providers'}];
 const defaultDashboard=()=>({columns:3,order:dashboardWidgets.map(w=>w.id),hidden:['companies-panel','devices-panel','backups-panel']});
 function normalizeDashboard(value){if(!value||typeof value!=='object')return defaultDashboard();const ids=dashboardWidgets.map(w=>w.id);return {columns:[1,2,3].includes(value?.columns)?value.columns:1,order:[...new Set([...(Array.isArray(value?.order)?value.order.filter(id=>ids.includes(id)):[]),...ids])],hidden:Array.isArray(value?.hidden)?[...new Set(value.hidden.filter(id=>ids.includes(id)))]:[]};}
 let dashboard=defaultDashboard();try{dashboard=normalizeDashboard(JSON.parse(localStorage.getItem('skybase-dashboard-layout')));}catch{}
@@ -15,7 +15,7 @@ function applyDashboard(){
     if(isDashboard){target.append(widget);widget.hidden=dashboard.hidden.includes(id);}
     else{$('#workspace').insertBefore(widget,$('#groups-panel'));widget.hidden=id.startsWith('dashboard-')&&id!=='dashboard-stats'||id==='companies-panel'&&page!=='companies'||id==='devices-panel'&&page!=='devices'||id==='backups-panel'&&page!=='backups';}
   }
-  if(isDashboard&&!dashboard.hidden.includes('backups-panel'))loadAcronis();
+  if(isDashboard&&!dashboard.hidden.includes('backups-panel')){loadAcronis();loadBackupProviders();}
   if(isDashboard&&dashboard.hidden.length===dashboardWidgets.length){target.append($('#dashboard-empty'));$('#dashboard-empty').hidden=false;}else $('#dashboard-empty').hidden=true;
 }
 function customizeDashboard(){
@@ -51,7 +51,7 @@ function changePage(value,updateUrl=false) {
   $('#companies-panel').hidden=!['overview','companies'].includes(page);
   $('#devices-panel').hidden=!['overview','devices'].includes(page);
   $('#backups-panel').hidden=page!=='backups';
-  if(page==='backups')loadAcronis();
+  if(page==='backups'){loadAcronis();loadBackupProviders();}
   $('#groups-panel').hidden=page!=='groups';
   $('#workspace-title').textContent={overview:'Dashboard',devices:'Computers',companies:'Customers & companies',groups:'Device groups',backups:'Backups'}[page];
   applyDashboard();
@@ -186,9 +186,21 @@ async function loadAcronis(){
     renderAcronis(await api('acronis'));acronisData=await api('acronis-inventory');
     if(acronisData.checkedAt&&!acronisData.error)renderAcronis({configured:true,authenticated:true,checkedAt:acronisData.checkedAt,consoleUrl:acronisData.consoleUrl});
     $('#acronis-inventory-status').textContent=acronisData.error||(acronisData.checkedAt?'Imported '+acronisData.resources.length+' resources · '+acronisData.tasks.length+' tasks · Checked '+new Date(acronisData.checkedAt).toLocaleString()+(acronisData.complete?'':'. Partial inventory; additional pages may be unavailable.'):'Waiting for Acronis credentials.');
-    renderBackups();renderDashboardOverview();
+    renderBackups();renderProviderChoice();renderDashboardOverview();
   }catch(error){$('#acronis-inventory-status').textContent=error.message;}finally{acronisLoading=false;}
 }
+let backupProviders={preferences:[],comet:{consoleUrl:null}},providersLoading=false;
+async function loadBackupProviders(){if(providersLoading)return;providersLoading=true;try{backupProviders=await api('backup-providers');renderProviderChoice();renderBackups();}catch(error){$('#backup-provider-message').textContent=error.message;}finally{providersLoading=false;}}
+function renderProviderChoice(){
+ const comet=$('#backup-provider-view').value==='comet';$('#comet-panel').hidden=!comet;$('#acronis-provider-panel').hidden=comet;$('#acronis-console').hidden=comet||!acronisData.consoleUrl;
+ const selected=inventory.companies.filter(c=>backupProviders.preferences.some(p=>p.company_id===c.id&&p.provider==='comet'));
+ $('#comet-companies').innerHTML=selected.map(c=>`<div class="priority-item"><div><strong>${escape(c.name)}</strong><p>Comet selected · ${inventory.devices.filter(d=>d.companyId===c.id).length} RMM computers · Backup status not connected</p></div></div>`).join('')||'<p class="empty">No companies have selected Comet yet.</p>';
+ const url=backupProviders.comet.consoleUrl;$('#comet-console').hidden=!url;if(url)$('#comet-console').href=url;
+ if(document.activeElement!==$('#comet-settings-form').elements.consoleUrl)$('#comet-settings-form').elements.consoleUrl.value=url||'';
+}
+$('#backup-provider-view').onchange=renderProviderChoice;
+$('#choose-backup-provider').onclick=()=>{showDialog(`<h2>Choose company backup provider</h2><form id="provider-choice-form"><label>Company<select name="companyId" required>${options(inventory.companies,'','Select company')}</select></label><label>Backup provider<select name="provider"><option value="acronis">Acronis</option><option value="comet">Comet Backup</option></select></label><p class="muted">This saves the company’s choice. It does not install agents, move existing backups, or cancel either subscription.</p>${actions('Save provider')}</form>`);const form=$('#provider-choice-form');form.elements.companyId.onchange=()=>{form.elements.provider.value=backupProviders.preferences.find(p=>p.company_id===form.elements.companyId.value)?.provider||'acronis';};form.onsubmit=async e=>{e.preventDefault();try{await api('backup-provider',Object.fromEntries(new FormData(form)));$('#modal').close();await loadBackupProviders();$('#backup-provider-message').textContent='Company backup provider saved.';}catch(error){$('#form-error').textContent=error.message;}};};
+$('#comet-settings-form').onsubmit=async e=>{e.preventDefault();const button=e.target.querySelector('button');button.disabled=true;try{await api('comet-settings',Object.fromEntries(new FormData(e.target)));await loadBackupProviders();$('#comet-settings-error').textContent='Console link saved. API connection is not configured.';}catch(error){$('#comet-settings-error').textContent=error.message;}finally{button.disabled=false;}};
 function backupDate(value){return value&&Number.isFinite(Date.parse(value))?new Date(value).toLocaleString():'Not verified';}
 function renderBackups(){
   const linked=inventory.devices.filter(d=>acronisData.links.some(l=>l.node_id===d.id)).length;
@@ -201,7 +213,7 @@ function renderBackups(){
     let label=!link?'Not linked':!resource?'Resource unavailable':!task?'No verified task':task.state==='completed'&&task.result==='ok'?'Last task succeeded':task.state==='completed'?'Last task needs attention':'Task: '+task.state;
     if(acronisData.error)label='Status unavailable';
     const success=!acronisData.error&&task?.state==='completed'&&task?.result==='ok';
-    return `<article class="device-card backup-card"><div class="device-card-heading"><span class="computer-icon" aria-hidden="true">▣</span><div><strong class="device-name">${escape(d.name)}</strong><p>${escape(d.company)}</p></div></div><p><span class="backup-badge ${success?'success':''}">${escape(label)}</span></p><div class="backup-facts"><div><span>Last successful backup task</span><strong>${escape(backupDate(backup?.lastSuccessfulTaskAt))}</strong></div><div><span>Acronis customer</span><strong>${escape(resource?.tenant||'Not linked')}</strong></div></div><div class="backup-card-footer">${resource&&acronisData.consoleUrl?`<a class="button-link primary" href="${escape(acronisData.consoleUrl)}" target="_blank" rel="noopener noreferrer">Manage in Acronis ↗</a>`:''}<button data-acronis-link="${escape(d.id)}" ${acronisData.error||!acronisData.checkedAt?'disabled':''}>${link?'Change device link':'Link backup device'}</button><button data-backup-info="${escape(d.id)}">Details</button></div></article>`;
+    return `<article class="device-card backup-card"><div class="device-card-heading"><span class="computer-icon" aria-hidden="true">▣</span><div><strong class="device-name">${escape(d.name)}</strong><p>${escape(d.company)}</p></div></div><p class="muted">Company choice: ${backupProviders.preferences.find(p=>p.company_id===d.companyId)?.provider==='comet'?'Comet Backup':'Acronis (default)'}</p><p><span class="backup-badge ${success?'success':''}">${escape(label)}</span></p><div class="backup-facts"><div><span>Last successful backup task</span><strong>${escape(backupDate(backup?.lastSuccessfulTaskAt))}</strong></div><div><span>Acronis customer</span><strong>${escape(resource?.tenant||'Not linked')}</strong></div></div><div class="backup-card-footer">${resource&&acronisData.consoleUrl?`<a class="button-link primary" href="${escape(acronisData.consoleUrl)}" target="_blank" rel="noopener noreferrer">Manage in Acronis ↗</a>`:''}<button data-acronis-link="${escape(d.id)}" ${acronisData.error||!acronisData.checkedAt?'disabled':''}>${link?'Change device link':'Link backup device'}</button><button data-backup-info="${escape(d.id)}">Details</button></div></article>`;
   }).join('')||'<p class="empty">No matching computers.</p>';
   const allowed=['D332948D-A7A9-4E07-B76C-253DCF6E17FB','1B6CB334-6CB5-4760-AE3C-B96A973D5A99'];
   const tasks=acronisData.tasks.filter(t=>$('#backup-history-filter').value==='all'||allowed.includes(t.type.toUpperCase())).sort((a,b)=>(Date.parse(b.completedAt||b.startedAt)||0)-(Date.parse(a.completedAt||a.startedAt)||0));

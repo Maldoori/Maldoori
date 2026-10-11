@@ -97,6 +97,13 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('company-update',{id:companyId,name:'New company',customerId:'missing'})).status,400);
   assert.equal((await api('company-update',{id:companyId,name:'New company',customerId})).status,200);
   assert.equal((await api('company-update',{id:'mesh//existing-group',name:'Existing company',customerId})).status,200);
+  assert.equal((await api('backup-provider',{companyId:'missing',provider:'comet'})).status,404);
+  assert.equal((await api('backup-provider',{companyId,provider:'unknown'})).status,400);
+  assert.equal((await api('backup-provider',{companyId,provider:'comet'})).status,200);
+  assert.equal((await api('backup-provider',{companyId:'mesh//existing-group',provider:'acronis'})).status,200);
+  for(const consoleUrl of ['http://comet.example','https://user:secret@comet.example','https://comet.example/?token=private','javascript:alert(1)'])assert.equal((await api('comet-settings',{consoleUrl})).status,400);
+  assert.equal((await api('comet-settings',{consoleUrl:'https://comet.example/'})).status,200);
+  assert.equal((await api('backup-providers')).data.comet.apiConnected,false);
   result=await api('inventory');assert.equal(result.data.companies.filter(c=>c.customer_id===customerId).length,2);assert.equal(result.data.companies[0].customer,'Small business customer');assert.equal(result.data.locations.length,2);assert.equal(result.data.deviceGroups.length,2);
   result=await api('locations',{companyId,name:'Branch office'});assert.equal(result.status,201);const branchId=result.data.id;
   assert.equal((await api('locations',{companyId,name:'Branch office'})).status,409);
@@ -156,6 +163,16 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('#acronis-connect').click();
       await page.waitForFunction(()=>document.querySelector('#acronis-status').textContent.includes('not configured'));
       assert.equal(await page.locator('#acronis-console').isVisible(),false);
+      await page.locator('#backup-provider-view').selectOption('comet');
+      await page.locator('#comet-panel').waitFor({state:'visible'});
+      assert.equal(await page.locator('#acronis-provider-panel').isVisible(),false);
+      await page.locator('#comet-companies').getByText('New company',{exact:true}).waitFor();
+      assert.equal(await page.locator('#comet-console').getAttribute('href'),'https://comet.example/');
+      await page.locator('#choose-backup-provider').click();
+      await page.locator('#provider-choice-form select[name="companyId"]').selectOption(companyId);
+      assert.equal(await page.locator('#provider-choice-form select[name="provider"]').inputValue(),'comet');
+      await page.locator('#provider-choice-form [data-close]').click();
+      await page.locator('#backup-provider-view').selectOption('acronis');
       await page.locator('[data-page="overview"]').click();
       await page.goBack();await page.locator('#backups-panel').waitFor({state:'visible'});
       await page.goForward();await page.locator('#dashboard-layout').waitFor({state:'visible'});
@@ -250,6 +267,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   await api('sync',{});assert.equal((await api('inventory')).data.devices.some(d=>d.id===remaining.id),false);
   await stop();await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
   assert.equal((await api('inventory')).data.devices.some(d=>d.id===remaining.id),false);
+  const choices=(await api('backup-providers')).data;assert.equal(choices.preferences.find(p=>p.company_id===companyId).provider,'comet');assert.equal(choices.comet.consoleUrl,'https://comet.example/');
   mockAcronis=true;await stop();await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
   const available=(await api('inventory')).data.devices[0];
   const imported=await api('acronis-inventory');assert.equal(imported.data.resources.length,1);assert.equal(imported.data.tasks[0].result,'ok');assert.equal(JSON.stringify(imported.data).includes('private'),false);
