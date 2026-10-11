@@ -47,6 +47,10 @@ db.exec("CREATE TABLE IF NOT EXISTS security_preferences(company_id TEXT PRIMARY
 initializePatches(db);
 db.exec("CREATE TABLE IF NOT EXISTS patch_notifications(id INTEGER PRIMARY KEY,patch_id TEXT NOT NULL REFERENCES patches(id) ON DELETE CASCADE,node_id TEXT NOT NULL,message TEXT NOT NULL,at TEXT NOT NULL)");
 const notificationBusy=new Set();
+db.exec("CREATE TABLE IF NOT EXISTS patch_notice_jobs(id TEXT PRIMARY KEY,patch_id TEXT NOT NULL REFERENCES patches(id) ON DELETE CASCADE,company_id TEXT NOT NULL REFERENCES companies(id),at TEXT NOT NULL,status TEXT NOT NULL); CREATE TABLE IF NOT EXISTS patch_notice_targets(job_id TEXT NOT NULL REFERENCES patch_notice_jobs(id) ON DELETE CASCADE,node_id TEXT NOT NULL,name TEXT NOT NULL,status TEXT NOT NULL,detail TEXT NOT NULL,PRIMARY KEY(job_id,node_id))");
+// Do not resend notices after a restart: a previous delivery may have succeeded.
+db.exec("UPDATE patch_notice_targets SET status='uncertain',detail='Server restarted before completion. Check delivery before retrying.' WHERE status IN ('queued','sending'); UPDATE patch_notice_jobs SET status='completed' WHERE status='running'");
+
 let acronisInventory={resources:[],tasks:[],backupResults:[],checkedAt:null,error:null},acronisSync;
 function syncAcronis(){
   if(acronisSync)return acronisSync;
@@ -54,6 +58,21 @@ function syncAcronis(){
   return acronisSync;
 }
 const serviceBusy = new Set();
+async function sendPatchNotice(device,patch,notice){
+ if(notificationBusy.has(device.id)||telemetryBusy.has(device.id)||serviceBusy.has(device.id))throw Object.assign(new Error('A command is running on this computer. Wait before retrying.'),{status:409});
+ notificationBusy.add(device.id);const command=notificationCommand(notice);audit('patch-notification-requested',device.id);
+ try{const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,notification:true});const acceptance=notificationAccepted(output.result,command.marker);
+  const at=new Date().toISOString();db.prepare('INSERT INTO patch_notifications(patch_id,node_id,message,at) VALUES (?,?,?,?)').run(patch.id,device.id,notice,at);audit('patch-notification-accepted',device.id);return {...acceptance,userReadVerified:false,at};
+ }finally{notificationBusy.delete(device.id);}
+}
+function startCompanyNotice(id,devices,patch,notice){
+ const queue=devices.filter(d=>d.online);
+ const worker=async()=>{while(queue.length){const device=queue.shift();db.prepare("UPDATE patch_notice_targets SET status='sending' WHERE job_id=? AND node_id=?").run(id,device.id);
+  try{if(telemetryBusy.has(device.id))await telemetryBusy.get(device.id).catch(()=>{});const result=await sendPatchNotice(device,patch,notice);db.prepare('UPDATE patch_notice_targets SET status=?,detail=? WHERE job_id=? AND node_id=?').run(result.partial?'partial':'accepted',result.partial?'Windows accepted some sessions; other sessions failed.':'Windows accepted the notice; user reading is not verified.',id,device.id);}
+  catch(error){const safe=error.status||error.message.startsWith('MeshCentral')||error.message.startsWith('Windows');db.prepare('UPDATE patch_notice_targets SET status=?,detail=? WHERE job_id=? AND node_id=?').run(error.message.includes('timed out')?'uncertain':'failed',safe?error.message:'Notification failed. Check agent permissions and security software.',id,device.id);}
+ }};
+ void Promise.all(Array.from({length:Math.min(3,queue.length)},worker)).then(()=>{db.prepare("UPDATE patch_notice_jobs SET status='completed' WHERE id=?").run(id);}).catch(()=>{db.prepare("UPDATE patch_notice_targets SET status='uncertain',detail='Notification job interrupted. Check delivery before retrying.' WHERE job_id=? AND status IN ('queued','sending')").run(id);db.prepare("UPDATE patch_notice_jobs SET status='completed' WHERE id=?").run(id);});
+}
 let companyBusy = false;
 const sessions = new Map(), attempts = new Map();
 const lifetime = 8 * 60 * 60 * 1000;
@@ -192,11 +211,12 @@ const server = http.createServer(async (req, res) => {
         }
         await synchronize();return reply(res,200,{ok:true});
       }
-      if(req.method==='GET' && url.pathname==='/api/patches')return reply(res,200,{patches:db.prepare('SELECT * FROM patches ORDER BY title').all(),rollouts:db.prepare('SELECT * FROM patch_rollouts').all().filter(r=>snapshot.devices.some(d=>d.id===r.node_id)),deploymentConnected:false,notifications:db.prepare('SELECT patch_id,node_id,at FROM patch_notifications ORDER BY at DESC LIMIT 1000').all().filter(n=>snapshot.devices.some(d=>d.id===n.node_id))});
+      if(req.method==='GET' && url.pathname==='/api/patches')return reply(res,200,{patches:db.prepare('SELECT * FROM patches ORDER BY title').all(),rollouts:db.prepare('SELECT * FROM patch_rollouts').all().filter(r=>snapshot.devices.some(d=>d.id===r.node_id)),deploymentConnected:false,jobs:db.prepare('SELECT * FROM patch_notice_jobs ORDER BY at DESC LIMIT 100').all(),notifications:db.prepare('SELECT patch_id,node_id,at FROM patch_notifications ORDER BY at DESC LIMIT 1000').all().filter(n=>snapshot.devices.some(d=>d.id===n.node_id))});
       if(req.method==='POST' && url.pathname==='/api/patch-save'){const input=await body(req);const id=savePatch(db,input);audit('patch-catalog-saved',id);return reply(res,200,{ok:true,id});}
       if(req.method==='POST' && url.pathname==='/api/patch-delete'){
         const input=await body(req);if(input.confirm!==true)return reply(res,400,{error:'Confirm removing this patch from the catalog.'});
         if(typeof input.id!=='string'||!db.prepare('SELECT id FROM patches WHERE id=?').get(input.id))return reply(res,404,{error:'Patch not found.'});
+        if(db.prepare("SELECT id FROM patch_notice_jobs WHERE patch_id=? AND status='running'").get(input.id))return reply(res,409,{error:'Wait for the notification job to finish before deleting this patch.'});
         db.prepare('DELETE FROM patches WHERE id=?').run(input.id);audit('patch-catalog-deleted',input.id);return reply(res,200,{ok:true});
       }
       if(req.method==='POST' && url.pathname==='/api/patch-notify'){
@@ -208,18 +228,20 @@ const server = http.createServer(async (req, res) => {
         const device=snapshot.devices.find(d=>d.id===input.nodeId);if(!device)return reply(res,404,{error:'Computer not found.'});
         if(!device.online)return reply(res,409,{error:'Computer is offline. No notification was sent.'});
         if(!device.windows)return reply(res,400,{error:'Notifications currently support Windows computers.'});
-        if(notificationBusy.has(device.id)||telemetryBusy.has(device.id)||serviceBusy.has(device.id))return reply(res,409,{error:'A command is running on this computer. Wait for it to finish before sending a notice.'});
-        notificationBusy.add(device.id);const command=notificationCommand(notice);audit('patch-notification-requested',device.id);
-        try{const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,notification:true});const acceptance=notificationAccepted(output.result,command.marker);
-          const at=new Date().toISOString();db.prepare('INSERT INTO patch_notifications(patch_id,node_id,message,at) VALUES (?,?,?,?)').run(patch.id,device.id,notice,at);audit('patch-notification-accepted',device.id);return reply(res,200,{ok:true,...acceptance,userReadVerified:false,at});
-        }finally{notificationBusy.delete(device.id);}
+        return reply(res,200,{ok:true,...await sendPatchNotice(device,patch,notice)});
+      }
+      if(req.method==='GET' && url.pathname==='/api/patch-notice-job'){
+        const job=db.prepare('SELECT * FROM patch_notice_jobs WHERE id=?').get(url.searchParams.get('id')||'');if(!job)return reply(res,404,{error:'Notification job not found.'});
+        return reply(res,200,{...job,targets:db.prepare('SELECT node_id,name,status,detail FROM patch_notice_targets WHERE job_id=? ORDER BY name').all(job.id)});
       }
       if(req.method==='POST' && url.pathname==='/api/patch-plan'){
-        const input=await body(req);if(typeof input.patchId!=='string'||!db.prepare('SELECT id FROM patches WHERE id=?').get(input.patchId))return reply(res,404,{error:'Patch not found.'});
+        const input=await body(req);if(typeof input.patchId!=='string')return reply(res,400,{error:'Choose a patch.'});const patch=db.prepare('SELECT * FROM patches WHERE id=?').get(input.patchId);if(!patch)return reply(res,404,{error:'Patch not found.'});
         if(typeof input.companyId!=='string'||!db.prepare('SELECT id FROM companies WHERE id=?').get(input.companyId))return reply(res,404,{error:'Company not found.'});
-        const devices=snapshot.devices.filter(d=>d.companyId===input.companyId&&/windows/i.test(d.os));if(!devices.length)return reply(res,400,{error:'No Windows computers found in this company.'});
-        const at=new Date().toISOString();db.exec('BEGIN');try{for(const d of devices)db.prepare('INSERT INTO patch_rollouts VALUES (?,?,?) ON CONFLICT(patch_id,node_id) DO NOTHING').run(input.patchId,d.id,at);db.exec('COMMIT');}catch(error){db.exec('ROLLBACK');throw error;}
-        audit('patch-rollout-planned',input.patchId);return reply(res,200,{ok:true,planned:devices.length,executed:false});
+        let notice;if(input.notify===true){if(input.confirm!==true)return reply(res,400,{error:'Confirm sending notices to the company computers.'});notice=patchNotice(patch,input.windowText);if(db.prepare("SELECT id FROM patch_notice_jobs WHERE status='running'").get())return reply(res,409,{error:'A company notification job is already running. Wait for it to finish.'});await synchronize();if(snapshot.error)return reply(res,502,{error:snapshot.error});}
+        const devices=snapshot.devices.filter(d=>d.companyId===input.companyId&&d.windows);if(!devices.length)return reply(res,400,{error:'No Windows computers found in this company.'});
+        const at=new Date().toISOString(),jobId=input.notify===true?randomBytes(16).toString('hex'):null;db.exec('BEGIN');try{for(const d of devices)db.prepare('INSERT INTO patch_rollouts VALUES (?,?,?) ON CONFLICT(patch_id,node_id) DO NOTHING').run(input.patchId,d.id,at);
+          if(jobId){db.prepare("INSERT INTO patch_notice_jobs VALUES (?,?,?,?, 'running')").run(jobId,patch.id,input.companyId,at);for(const d of devices)db.prepare('INSERT INTO patch_notice_targets VALUES (?,?,?,?,?)').run(jobId,d.id,d.name,d.online?'queued':'offline',d.online?'Waiting to send.':'Computer is offline. No notice is queued for later delivery.');}db.exec('COMMIT');}catch(error){db.exec('ROLLBACK');throw error;}
+        audit('patch-rollout-planned',input.patchId);if(jobId)startCompanyNotice(jobId,devices,patch,notice);return reply(res,200,{ok:true,planned:devices.length,executed:false,jobId});
       }
       if(req.method==='GET' && url.pathname==='/api/security')return reply(res,200,{preferences:db.prepare('SELECT * FROM security_preferences').all(),providers:['bitdefender','defender','acronis'].map(id=>({id,consoleUrl:db.prepare('SELECT console_url FROM security_settings WHERE provider=?').get(id)?.console_url||(id==='acronis'&&acronis.configured?acronis.url.href:null),protectionVerified:false,apiConnected:false}))});
       if(req.method==='POST' && url.pathname==='/api/security-provider'){

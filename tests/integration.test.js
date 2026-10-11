@@ -235,7 +235,13 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('#patch-search').fill('Microsoft');assert.equal(await page.locator('.patch-card').count(),1);
       await page.locator('[data-patch-deploy]').click();
       await page.locator('#patch-plan-form select').selectOption(companyId);
+      await page.locator('#patch-plan-form input[name="windowText"]').fill('Tomorrow 6 PM Central');
       await page.locator('#patch-plan-form button.primary').click();
+      await page.locator('#company-notice-results').getByText(/Notification job complete/).waitFor();
+      assert.match(await page.locator('#company-notice-results').textContent(),/offline/);
+      assert.equal(await page.locator('#company-notice-results .priority-item').count(),1);
+      assert.equal(await page.locator('#company-notice-results').getByText(/REAL-WINDOWS/).count(),0);
+      await page.locator('#modal [data-close]').click();
       await page.waitForFunction(()=>document.querySelector('.patch-counts')?.textContent.includes('Planned: 1'));
       await page.locator('[data-patch-notify]').click();
       await page.locator('#patch-notify-form input[name="windowText"]').fill('Tomorrow 6 PM Central');
@@ -359,6 +365,12 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   const notified=await api('patch-notify',{patchId,nodeId:'node//branch-server',windowText:'Tomorrow 6 PM Central',confirm:true});
   assert.equal(notified.status,200);assert.equal(notified.data.accepted,true);assert.equal(notified.data.userReadVerified,false);
   assert.equal((await api('patches')).data.notifications.length,1);
+  devices[serverGroup].push({_id:'node//company-online-second',name:'SECOND-WINDOWS',conn:1,osdesc:'Windows 11'},{_id:'node//company-offline',name:'OFFLINE-WINDOWS',conn:0,osdesc:'Windows 11'});await api('sync',{});
+  const companyJob=await api('patch-plan',{patchId,companyId,windowText:'Tomorrow 6 PM Central',notify:true,confirm:true});assert.equal(companyJob.status,200);assert.equal(companyJob.data.executed,false);
+  let job;for(let attempt=0;attempt<100;attempt++){job=(await api('patch-notice-job?id='+companyJob.data.jobId)).data;if(job.status==='completed')break;await new Promise(resolve=>setTimeout(resolve,10));}
+  assert.equal(job.status,'completed');assert.equal(job.targets.length,3);assert.equal(job.targets.filter(t=>t.status==='accepted').length,2);assert.equal(job.targets.filter(t=>t.status==='offline').length,1);assert.equal(job.targets.some(t=>t.node_id==='node//original-device'),false);
+  assert.equal((await api('patch-plan',{patchId,companyId,windowText:'Tomorrow 6 PM Central',notify:true})).status,400);
+
   commandFailure=true;const noticeFailure=await api('patch-notify',{patchId,nodeId:'node//branch-server',windowText:'Tomorrow 6 PM Central',confirm:true});assert.equal(noticeFailure.status,502);assert.match(noticeFailure.data.error,/Windows could not send/);commandFailure=false;
   const remaining=(await api('inventory')).data.devices[0];
   assert.equal((await api('device-update',{id:remaining.id,name:''})).status,400);
