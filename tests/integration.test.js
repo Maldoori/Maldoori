@@ -33,11 +33,11 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       if(input.action==='runcommands'){
         if(permissionFailure){socket.send(JSON.stringify({...output,result:'Access denied'}));return;}
         const commandScript=input.type===1?Buffer.from(input.cmds.split(' ').at(-1),'base64').toString('utf16le'):input.cmds;
-        assert.equal(input.reply,true);assert.equal(input.type,commandScript.includes('Win32_Processor')?1:2);assert.equal(input.runAsUser,0);assert.equal(input.nodeids.length,1);
+        assert.equal(input.reply,true);assert.equal(input.type,commandScript.includes('Win32_Processor')||commandScript.includes('msg.exe')?1:2);assert.equal(input.runAsUser,0);assert.equal(input.nodeids.length,1);
         const marker=commandScript.match(/MALDOORI_[a-f0-9]{24}/)[0];
         if(commandScript.includes('Stop-Service'))mockServices[0].State='Stopped';
         if(commandScript.includes('Start-Service')||commandScript.includes('Restart-Service'))mockServices[0].State='Running';
-        output={action:'msg',type:'runcommands',responseid:input.responseid,result:marker+JSON.stringify(commandFailure?{ok:false}:(commandScript.includes('Win32_Processor')?{ok:true,cpu:42,memoryTotal:16000,memoryFree:4000,diskTotal:100000,diskFree:45000,diskName:'C:'}:{ok:true,services:mockServices}))+marker};
+        output={action:'msg',type:'runcommands',responseid:input.responseid,result:marker+JSON.stringify(commandFailure?{ok:false}:(commandScript.includes('msg.exe')?{ok:true}:(commandScript.includes('Win32_Processor')?{ok:true,cpu:42,memoryTotal:16000,memoryFree:4000,diskTotal:100000,diskFree:45000,diskName:'C:'}:{ok:true,services:mockServices})))+marker};
       }
       socket.send(JSON.stringify(output));
     });
@@ -237,6 +237,10 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await page.locator('#patch-plan-form select').selectOption(companyId);
       await page.locator('#patch-plan-form button.primary').click();
       await page.waitForFunction(()=>document.querySelector('.patch-counts')?.textContent.includes('Planned: 1'));
+      await page.locator('[data-patch-notify]').click();
+      await page.locator('#patch-notify-form input[name="windowText"]').fill('Tomorrow 6 PM Central');
+      await page.locator('#patch-notice-preview').getByText(/A restart is expected/).waitFor();
+      await page.locator('#modal [data-close]').click();
       await page.locator('[data-patch-edit]').click();
       await page.locator('#patch-form input[name="title"]').fill('Browser edited update');
       await page.locator('#patch-form button.primary').click();
@@ -348,6 +352,14 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       assert.deepEqual(errors,[]);
     } finally { await browser.close(); }
   }
+  assert.equal((await api('patch-notify',{patchId,nodeId:'node//original-device',windowText:'Tomorrow 6 PM Central'})).status,400);
+  assert.equal((await api('patch-notify',{patchId,nodeId:'node//original-device',windowText:'Tomorrow 6 PM Central',confirm:true})).status,400);
+  assert.equal((await api('patch-notify',{patchId,nodeId:'node//branch-server',windowText:'Tomorrow 6 PM Central',confirm:true})).status,409);
+  devices[serverGroup]=[{_id:'node//branch-server',name:'BRANCH-SERVER',conn:1,osdesc:'Windows Server 2022'}];await api('sync',{});
+  const notified=await api('patch-notify',{patchId,nodeId:'node//branch-server',windowText:'Tomorrow 6 PM Central',confirm:true});
+  assert.equal(notified.status,200);assert.equal(notified.data.accepted,true);assert.equal(notified.data.userReadVerified,false);
+  assert.equal((await api('patches')).data.notifications.length,1);
+  commandFailure=true;assert.equal((await api('patch-notify',{patchId,nodeId:'node//branch-server',windowText:'Tomorrow 6 PM Central',confirm:true})).status,502);commandFailure=false;
   const remaining=(await api('inventory')).data.devices[0];
   assert.equal((await api('device-update',{id:remaining.id,name:''})).status,400);
   assert.equal((await api('device-update',{id:remaining.id,name:'Renamed computer'})).status,200);

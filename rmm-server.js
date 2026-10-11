@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {patchNotice,notificationCommand,notificationAccepted} from './lib/patch-notifications.js';
 import {initializePatches,savePatch} from './lib/patches.js';
 import { readFile, mkdir, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -44,6 +45,8 @@ if(!db.prepare("SELECT sql FROM sqlite_master WHERE name='backup_preferences'").
 }
 db.exec("CREATE TABLE IF NOT EXISTS security_preferences(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('bitdefender','defender','acronis'))); CREATE TABLE IF NOT EXISTS security_settings(provider TEXT PRIMARY KEY CHECK(provider IN ('bitdefender','defender','acronis')),console_url TEXT NOT NULL)");
 initializePatches(db);
+db.exec("CREATE TABLE IF NOT EXISTS patch_notifications(id INTEGER PRIMARY KEY,patch_id TEXT NOT NULL REFERENCES patches(id) ON DELETE CASCADE,node_id TEXT NOT NULL,message TEXT NOT NULL,at TEXT NOT NULL)");
+const notificationBusy=new Set();
 let acronisInventory={resources:[],tasks:[],backupResults:[],checkedAt:null,error:null},acronisSync;
 function syncAcronis(){
   if(acronisSync)return acronisSync;
@@ -159,6 +162,7 @@ const server = http.createServer(async (req, res) => {
         if(!device)return reply(res,404,{error:'Computer not found.'});
         if(!device.online)return reply(res,409,{error:'Computer is offline.'});
         if(!device.windows)return reply(res,400,{error:'Metrics currently support Windows computers.'});
+        if(notificationBusy.has(device.id))return reply(res,409,{error:'A user notification is running on this computer.'});
         const cached=telemetryCache.get(device.id);
         if(cached&&Date.now()-Date.parse(cached.checkedAt)<30000)return reply(res,200,cached);
         if(!telemetryBusy.has(device.id)){
@@ -188,12 +192,27 @@ const server = http.createServer(async (req, res) => {
         }
         await synchronize();return reply(res,200,{ok:true});
       }
-      if(req.method==='GET' && url.pathname==='/api/patches')return reply(res,200,{patches:db.prepare('SELECT * FROM patches ORDER BY title').all(),rollouts:db.prepare('SELECT * FROM patch_rollouts').all().filter(r=>snapshot.devices.some(d=>d.id===r.node_id)),deploymentConnected:false});
+      if(req.method==='GET' && url.pathname==='/api/patches')return reply(res,200,{patches:db.prepare('SELECT * FROM patches ORDER BY title').all(),rollouts:db.prepare('SELECT * FROM patch_rollouts').all().filter(r=>snapshot.devices.some(d=>d.id===r.node_id)),deploymentConnected:false,notifications:db.prepare('SELECT patch_id,node_id,at FROM patch_notifications ORDER BY at DESC LIMIT 1000').all().filter(n=>snapshot.devices.some(d=>d.id===n.node_id))});
       if(req.method==='POST' && url.pathname==='/api/patch-save'){const input=await body(req);const id=savePatch(db,input);audit('patch-catalog-saved',id);return reply(res,200,{ok:true,id});}
       if(req.method==='POST' && url.pathname==='/api/patch-delete'){
         const input=await body(req);if(input.confirm!==true)return reply(res,400,{error:'Confirm removing this patch from the catalog.'});
         if(typeof input.id!=='string'||!db.prepare('SELECT id FROM patches WHERE id=?').get(input.id))return reply(res,404,{error:'Patch not found.'});
         db.prepare('DELETE FROM patches WHERE id=?').run(input.id);audit('patch-catalog-deleted',input.id);return reply(res,200,{ok:true});
+      }
+      if(req.method==='POST' && url.pathname==='/api/patch-notify'){
+        const input=await body(req);if(input.confirm!==true)return reply(res,400,{error:'Review the notice and confirm sending it.'});
+        if(typeof input.patchId!=='string'||typeof input.nodeId!=='string')return reply(res,400,{error:'Choose a patch and computer.'});
+        const patch=db.prepare('SELECT * FROM patches WHERE id=?').get(input.patchId);if(!patch)return reply(res,404,{error:'Patch not found.'});
+        if(!db.prepare('SELECT 1 FROM patch_rollouts WHERE patch_id=? AND node_id=?').get(input.patchId,input.nodeId))return reply(res,400,{error:'Save a rollout plan for this computer first.'});
+        const notice=patchNotice(patch,input.windowText);await synchronize();if(snapshot.error)return reply(res,502,{error:snapshot.error});
+        const device=snapshot.devices.find(d=>d.id===input.nodeId);if(!device)return reply(res,404,{error:'Computer not found.'});
+        if(!device.online)return reply(res,409,{error:'Computer is offline. No notification was sent.'});
+        if(!device.windows)return reply(res,400,{error:'Notifications currently support Windows computers.'});
+        if(notificationBusy.has(device.id)||telemetryBusy.has(device.id)||serviceBusy.has(device.id))return reply(res,409,{error:'A command is running on this computer. Wait for it to finish before sending a notice.'});
+        notificationBusy.add(device.id);const command=notificationCommand(notice);audit('patch-notification-requested',device.id);
+        try{const output=await mesh.request('runcommands',{nodeids:[device.id],type:1,cmds:command.command,reply:true,runAsUser:0},{output:true,notification:true});notificationAccepted(output.result,command.marker);
+          const at=new Date().toISOString();db.prepare('INSERT INTO patch_notifications(patch_id,node_id,message,at) VALUES (?,?,?,?)').run(patch.id,device.id,notice,at);audit('patch-notification-accepted',device.id);return reply(res,200,{ok:true,accepted:true,userReadVerified:false,at});
+        }finally{notificationBusy.delete(device.id);}
       }
       if(req.method==='POST' && url.pathname==='/api/patch-plan'){
         const input=await body(req);if(typeof input.patchId!=='string'||!db.prepare('SELECT id FROM patches WHERE id=?').get(input.patchId))return reply(res,404,{error:'Patch not found.'});
@@ -328,6 +347,7 @@ const server = http.createServer(async (req, res) => {
         if(!device) return reply(res,404,{error:'Device is not accessible to this integration account.'});
         if(!device.online) return reply(res,409,{error:'Device is offline.'});
         if(!device.windows) return reply(res,400,{error:'Windows service management requires a Windows agent.'});
+        if(notificationBusy.has(device.id))return reply(res,409,{error:'A user notification is running on this device.'});
         if(serviceBusy.has(device.id)) return reply(res,409,{error:'A service request is already running on this device.'});
         const action=url.pathname==='/api/services'?'list':input.action;
         if(url.pathname==='/api/service-action' && !['start','stop','restart'].includes(action)) return reply(res,400,{error:'Choose start, stop, or restart.'});
