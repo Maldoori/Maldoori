@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {gunzipSync} from 'node:zlib';
 import assert from 'node:assert/strict';
 import https from 'node:https';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
@@ -56,7 +56,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   // Choose an available port without fixed-port collisions.
   const probe=https.createServer();await new Promise(r=>probe.listen(0,'127.0.0.1',r));backendPort=probe.address().port;await new Promise(r=>probe.close(r));
   const origin='http://127.0.0.1:'+backendPort;
-  let mockAcronis=false;
+  let mockAcronis=false,mockTickets=false;
   const start=async(useFile=false)=>{
     const env={...process.env,PORT:String(backendPort),PUBLIC_URL:origin,BIND_ADDRESS:'127.0.0.1',RMM_USERNAME:'test-admin',RMM_PASSWORD:'test-rmm-password-long',MESH_URL:meshUrl,MESH_USERNAME:'test-integration',MESH_PASSWORD:'test-mesh-password',DATA_DIR:resolve(dir,'data'),NODE_EXTRA_CA_CERTS:resolve(dir,'cert.pem')};
     if(mockAcronis){
@@ -65,6 +65,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       await writeFile(preload,`globalThis.fetch=async(url)=>({ok:true,status:200,json:async()=>url.pathname.endsWith('/token')?{access_token:'private-token',expires_in:3600}:url.pathname.includes('resource_management')?{items:[{id:'acronis-computer',tenant_id:'client-tenant',tenant_name:'Client',name:'Computer',type:'machine'}]}:{items:[{uuid:'job',type:'backup',tenant:{id:'client-tenant',name:'Client'},state:'completed',result:{code:'ok',payload:'private'}}]}});`);
       env.NODE_OPTIONS='--import='+preload;
     }
+    if(mockTickets){const preload=resolve(dir,'tickets-preload.mjs');await writeFile(preload,`globalThis.fetch=async()=>({ok:true,text:async()=>JSON.stringify({choices:[{message:{content:JSON.stringify({summary:'Printer troubleshooting',likelyCauses:['Connectivity'],steps:['Check power'],questions:['Which printer?'],escalation:'Ask IT'})}}]})});`);env.NODE_OPTIONS='--import='+preload;}
     if(useFile){
       const config={};
       for(const key of ['RMM_USERNAME','RMM_PASSWORD','MESH_URL','MESH_USERNAME','MESH_PASSWORD']){config[key]=env[key];delete env[key];}
@@ -86,6 +87,21 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('login',{username:'test-admin',password:'test-rmm-password-long'},'https://evil.example')).status,403);
   assert.equal((await api('login',{username:'test-admin',password:'wrong'})).status,401);
   assert.equal((await api('login',{username:'test-admin',password:'test-rmm-password-long'})).status,200);
+  assert.equal((await api('ticket-save',{title:'',description:'Empty title'})).status,400);
+  const savedTicket=await api('ticket-save',{title:'Printer offline',description:'Printer stopped working',priority:'high',category:'network'});assert.equal(savedTicket.status,201);const ticketId=savedTicket.data.id;
+  assert.equal((await api('ticket-note',{id:ticketId,note:'Checked printer power'})).status,200);
+  assert.equal((await api('ticket-status',{id:ticketId,status:'in_progress'})).status,200);
+  assert.equal((await api('ticket?id='+ticketId)).data.messages.length,1);
+  assert.equal((await api('ticket-review',{id:ticketId})).status,502);
+  assert.equal((await api('ticket-mail-sync',{})).status,400);
+  assert.equal((await api('ticket-integrations')).data.ai.configured,false);
+  const ticketConfig={address:'help@example.com',host:'mail.privateemail.com',user:'help@example.com',folder:'INBOX',password:'private-ticket-password',apiKey:'',model:'gpt-4.1-mini',emailEnabled:false,autoAI:false,clearAI:false};
+  assert.equal((await api('ticket-config',ticketConfig,'https://evil.example')).status,403);
+  assert.equal((await api('ticket-config',{...ticketConfig,address:'bad',emailEnabled:true})).status,400);
+  assert.equal((await api('ticket-config',ticketConfig)).status,200);
+  const integrationConfig=(await api('ticket-integrations')).data;assert.equal(integrationConfig.email.passwordSaved,true);assert.equal(JSON.stringify(integrationConfig).includes('private-ticket-password'),false);
+  assert.equal((await stat(resolve(dir,'data/ticketing-credentials.json'))).mode&0o077,0);
+
   assert.equal((await api('acronis')).data.configured,false);
   const unavailable=await api('acronis-connect',{});assert.equal(unavailable.status,502);assert.equal(unavailable.data.authenticated,false);assert.equal(unavailable.data.backupStatusVerified,false);
   let result=await api('inventory'); assert.equal(result.data.devices[0].name,'REAL-WINDOWS');
@@ -200,6 +216,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('backup-providers')).data.preferences.find(p=>p.company_id===companyId).provider,'msp360');
   assert.equal((await api('backup-provider',{companyId,provider:'comet'})).status,200);
 
+  assert.equal((await api('ticket?id='+ticketId)).data.status,'in_progress');
   const restored=(await api('inventory')).data;assert.equal(restored.customers.find(c=>c.id===customerId).email,'support@skybase.example');assert.equal(restored.companies.length,2);assert.equal(restored.devices.find(d=>d.name==='NEW-PC').online,false);assert.equal(restored.devices.length,3);
   if (process.env.BROWSER_TEST_MODULE) {
     const {chromium}=await import(process.env.BROWSER_TEST_MODULE);
@@ -271,6 +288,17 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       assert.equal(new URL(page.url()).hash,'#network');await page.locator('#network-device-list').getByText('Office printer',{exact:true}).waitFor();
       await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-network-scan.png',fullPage:true});
       await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});
+      await page.locator('[data-page="tickets"]').click();
+      await page.locator('#ticket-list').getByText('Printer offline',{exact:true}).waitFor();
+      await page.locator('#ticket-create').click();await page.locator('#ticket-form [name="title"]').fill('Outlook email issue');await page.locator('#ticket-form [name="description"]').fill('Outlook is not receiving email');await page.locator('#ticket-form [name="customerId"]').selectOption(customerId);await page.locator('#ticket-form .primary').click();
+      await page.locator('#ticket-list').getByText('Outlook email issue',{exact:true}).waitFor();
+      await page.locator('#ticket-list .ticket-card').filter({has:page.getByText('Outlook email issue',{exact:true})}).locator('[data-ticket-edit]').click();await page.locator('#ticket-form [name="priority"]').selectOption('urgent');await page.locator('#ticket-form .primary').click();
+      await page.locator('[data-ticket-filter="resolved"]').click();await page.waitForFunction(()=>document.querySelectorAll('.ticket-card').length===0);assert.equal(await page.locator('.ticket-card').count(),0);await page.locator('[data-ticket-filter=""]').click();await page.locator('#ticket-list').getByText('Outlook email issue',{exact:true}).waitFor();
+      await page.locator('#ticket-list .ticket-card').filter({has:page.getByText('Outlook email issue',{exact:true})}).locator('[data-ticket-view]').first().click();assert.equal(await page.locator('#ticket-ai-review').isDisabled(),true);await page.locator('#ticket-note-form [name="note"]').fill('Check mailbox connectivity');await page.locator('#ticket-note-form .primary').click();await page.locator('.ticket-updates').getByText('Check mailbox connectivity',{exact:true}).waitFor();await page.locator('#modal [data-close]').first().click();
+      await page.reload();await page.locator('#tickets-panel').waitFor({state:'visible'});assert.equal(new URL(page.url()).hash,'#tickets');await page.locator('#ticket-list').getByText('Outlook email issue',{exact:true}).waitFor();
+      await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-ticket-dashboard.png',fullPage:true});await page.locator('#ticket-create').click();await page.screenshot({path:'/tmp/skybase-create-ticket.png',fullPage:true});await page.locator('#modal [data-close]').first().click();
+      await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});
+      await page.locator('#tickets-email').click();await page.locator('#ticket-config-form').waitFor({state:'visible'});await page.screenshot({path:'/tmp/skybase-ticket-email-setup.png',fullPage:true});assert.equal(await page.locator('#ticket-email-check').isDisabled(),true);assert.equal(await page.locator('#ticket-config-form [name="password"]').inputValue(),'');await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});await page.locator('#ticket-config-form [name="address"]').fill('support@example.com');await page.locator('#ticket-config-form [name="user"]').fill('support@example.com');await page.locator('#ticket-config-form button.primary').click();await page.locator('#modal').waitFor({state:'hidden'});assert.equal((await api('ticket-integrations')).data.email.address,'support@example.com');
       await page.locator('[data-page="scripts"]').click();
       assert.equal(await page.locator('.script-card').count(),8);
       await page.locator('[data-script-category="Monitoring"]').click();assert.equal(await page.locator('.script-card').count(),1);
@@ -490,6 +518,17 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('security')).data.preferences.find(p=>p.company_id===companyId).provider,'bitdefender');
   assert.equal((await api('security')).data.providers.find(p=>p.id==='bitdefender').consoleUrl,'https://security.example/');
   const choices=(await api('backup-providers')).data;assert.equal(choices.preferences.find(p=>p.company_id===companyId).provider,'comet');assert.equal(choices.comet.consoleUrl,'https://comet.example/');
+  assert.equal((await api('ticket-config',{...ticketConfig,address:'support@example.com',apiKey:'private-ai-fixture-key'})).status,200);
+  mockTickets=true;await stop();await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
+  const aiJobDb=new DatabaseSync(resolve(dir,'data/rmm.sqlite'));aiJobDb.prepare("INSERT INTO ticket_ai_jobs(ticket_id,status) VALUES (?,'queued')").run(ticketId);aiJobDb.close();
+  assert.equal((await api('ticket-config',{...ticketConfig,apiKey:'',autoAI:true})).status,200);
+  for(let n=0;n<30;n++){if((await api('ticket?id='+ticketId)).data.ai.summary)break;await new Promise(r=>setTimeout(r,25));}
+  const automaticReview=(await api('ticket?id='+ticketId)).data;assert.equal(automaticReview.ai.summary,'Printer troubleshooting');assert.equal(automaticReview.aiJob.status,'completed');
+  assert.equal((await api('ticket-config',{...ticketConfig,autoAI:false})).status,200);
+  const aiReview=await api('ticket-review',{id:ticketId});assert.equal(aiReview.status,200);assert.equal(aiReview.data.summary,'Printer troubleshooting');assert.equal((await api('ticket?id='+ticketId)).data.ai.steps[0],'Check power');
+  assert.equal((await api('ticket-note',{id:ticketId,note:'Further checks'})).status,200);assert.deepEqual((await api('ticket?id='+ticketId)).data.ai,{});
+  assert.equal((await api('ticket-delete',{id:ticketId})).status,400);assert.equal((await api('ticket-delete',{id:ticketId,confirm:true})).status,200);assert.equal((await api('ticket?id='+ticketId)).status,404);
+  assert.equal((await api('ticket-config',{...ticketConfig,clearAI:true})).status,200);mockTickets=false;
   mockAcronis=true;await stop();await start(true);cookie='';await api('login',{username:'test-admin',password:'test-rmm-password-long'});
   const available=(await api('inventory')).data.devices[0];
   const imported=await api('acronis-inventory');assert.equal(imported.data.resources.length,1);assert.equal(imported.data.tasks[0].result,'ok');assert.equal(JSON.stringify(imported.data).includes('private'),false);

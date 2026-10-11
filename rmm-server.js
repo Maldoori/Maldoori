@@ -1,9 +1,11 @@
 import http from 'node:http';
+import {initializeTickets,ticketInput,createTicket,importTicketEmail} from './lib/tickets.js';
+import {TicketMailbox,TicketAI} from './lib/ticket-integrations.js';
 import {directoryCommand,parseDirectory} from './lib/active-directory.js';
 import {networkRange,networkScanCommand,parseNetworkScan} from './lib/network-scan.js';
 import {patchNotice,notificationCommand,notificationAccepted} from './lib/patch-notifications.js';
 import {initializePatches,savePatch} from './lib/patches.js';
-import { readFile, mkdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, rename, unlink, lstat, mkdir, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -48,6 +50,20 @@ if(!db.prepare("SELECT sql FROM sqlite_master WHERE name='backup_preferences'").
 db.exec("CREATE TABLE IF NOT EXISTS security_preferences(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('bitdefender','defender','acronis'))); CREATE TABLE IF NOT EXISTS security_settings(provider TEXT PRIMARY KEY CHECK(provider IN ('bitdefender','defender','acronis')),console_url TEXT NOT NULL)");
 initializePatches(db);
 db.exec("CREATE TABLE IF NOT EXISTS patch_notifications(id INTEGER PRIMARY KEY,patch_id TEXT NOT NULL REFERENCES patches(id) ON DELETE CASCADE,node_id TEXT NOT NULL,message TEXT NOT NULL,at TEXT NOT NULL)");
+initializeTickets(db);
+const ticketConfigPath=resolve(dataDir,'ticketing-credentials.json');let ticketConfig={};
+try{const metadata=await lstat(ticketConfigPath);if(!metadata.isFile()||(metadata.mode&0o077))throw new Error('Ticketing credentials must be an owner-only regular file (chmod 600).');ticketConfig=JSON.parse(await readFile(ticketConfigPath,'utf8'));if(!ticketConfig||typeof ticketConfig!=='object'||Array.isArray(ticketConfig))throw new Error('Invalid ticketing credentials file.');}catch(error){if(error.code!=='ENOENT')throw error;}
+const ticketSetting=name=>ticketConfig[name]??setting(name);
+let ticketMailbox=new TicketMailbox(ticketSetting),ticketAI=new TicketAI(ticketSetting);const ticketAIBusy=new Set();let ticketConfigBusy=false,ticketMailBusy=false,ticketMailState={checkedAt:null,error:null,imported:0,limited:false};
+function ticketRecord(id){return db.prepare('SELECT * FROM tickets WHERE id=? AND deleted_at IS NULL').get(id);}
+async function reviewTicket(id){if(ticketConfigBusy)throw Object.assign(new Error('Ticket integration settings are being saved.'),{status:409});const ticket=ticketRecord(id);if(!ticket)throw Object.assign(new Error('Ticket not found.'),{status:404});if(ticketAIBusy.size)throw Object.assign(new Error('An AI review is running. Try again after it completes.'),{status:409});ticketAIBusy.add(id);audit('ticket-ai-review-requested',id);try{const messages=db.prepare('SELECT body FROM ticket_messages WHERE ticket_id=? ORDER BY at').all(id);const review=await ticketAI.review(ticket,messages);const current=ticketRecord(id);if(!current||current.updated_at!==ticket.updated_at)throw Object.assign(new Error('The ticket changed during AI review. Review the current ticket again.'),{status:409});db.prepare('UPDATE tickets SET ai=? WHERE id=?').run(JSON.stringify(review),id);db.prepare("UPDATE ticket_ai_jobs SET status='completed',detail='' WHERE ticket_id=?").run(id);audit('ticket-ai-reviewed',id);return review;}finally{ticketAIBusy.delete(id);}}
+let ticketAutoReviewRunning=false,ticketAutoTimer;
+async function drainTicketAI(){if(ticketAutoReviewRunning||!ticketAI.configured||!ticketAI.auto)return;if(ticketConfigBusy||ticketAIBusy.size){clearTimeout(ticketAutoTimer);ticketAutoTimer=setTimeout(drainTicketAI,2000);ticketAutoTimer.unref();return;}ticketAutoReviewRunning=true;try{while(ticketAI.configured&&ticketAI.auto){const job=db.prepare("SELECT j.ticket_id FROM ticket_ai_jobs j JOIN tickets t ON t.id=j.ticket_id WHERE j.status='queued' AND t.deleted_at IS NULL LIMIT 1").get();if(!job)break;db.prepare("UPDATE ticket_ai_jobs SET status='running' WHERE ticket_id=?").run(job.ticket_id);try{await reviewTicket(job.ticket_id);db.prepare("UPDATE ticket_ai_jobs SET status='completed',detail='' WHERE ticket_id=? AND status='running'").run(job.ticket_id);}catch(error){db.prepare("UPDATE ticket_ai_jobs SET status='failed',detail=? WHERE ticket_id=? AND status='running'").run(error.status?error.message:'AI review failed. Retry from the ticket.',job.ticket_id);audit('ticket-ai-review-failed',job.ticket_id);}}}finally{ticketAutoReviewRunning=false;}}
+async function syncTicketMail(){if(ticketConfigBusy)throw Object.assign(new Error('Ticket integration settings are being saved.'),{status:409});if(!ticketMailbox.configured)throw Object.assign(new Error('Configure and enable the support mailbox first.'),{status:400});if(ticketMailBusy)throw Object.assign(new Error('Email intake is already checking the mailbox.'),{status:409});ticketMailBusy=true;try{const key='mail-cursor:'+ticketMailbox.provider+':'+ticketMailbox.address.toLowerCase(),saved=db.prepare('SELECT value FROM ticket_settings WHERE id=?').get(key);const cursor=saved?JSON.parse(saved.value):{};const since=cursor.since||new Date(Date.now()-300000).toISOString();const result=await ticketMailbox.messages(since,cursor);let imported=0,skipped=0;const reviewIds=new Set();for(const email of result.emails){if(email.sender?.toLowerCase()===ticketMailbox.address.toLowerCase())continue;let importedEmail;try{importedEmail=importTicketEmail(db,email,ticketMailbox.provider+':'+ticketMailbox.address.toLowerCase());}catch(error){if(error.status!==400)throw error;skipped++;audit('ticket-email-skipped','Invalid email sender or content; check support mailbox');continue;}if(!importedEmail.duplicate&&!importedEmail.ignored){imported++;reviewIds.add(importedEmail.id);audit('ticket-email-imported',importedEmail.id);}}
+ const next=result.checkpoint||{since:result.limited?since:new Date(Date.now()-300000).toISOString()};db.prepare('INSERT INTO ticket_settings VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value').run(key,JSON.stringify(next));ticketMailState={checkedAt:new Date().toISOString(),error:null,imported,skipped,limited:result.limited,initialized:!!result.initialized};
+ if(ticketAI.configured&&ticketAI.auto){for(const id of reviewIds)db.prepare("INSERT INTO ticket_ai_jobs(ticket_id,status) VALUES (?,'queued') ON CONFLICT(ticket_id) DO UPDATE SET status='queued',detail=''").run(id);void drainTicketAI().catch(()=>{});}
+ return ticketMailState;}catch(error){ticketMailState.error=error.status?error.message:'Email intake failed. Check mailbox configuration.';throw error;}finally{ticketMailBusy=false;}}
+function validateTicketLinks(value){if(value.customerId&&!db.prepare('SELECT id FROM customers WHERE id=?').get(value.customerId))throw Object.assign(new Error('Customer not found.'),{status:404});if(value.nodeId){const device=snapshot.devices.find(d=>d.id===value.nodeId),company=device&&db.prepare('SELECT customer_id FROM companies WHERE id=?').get(device.companyId);if(!device||!value.customerId||company?.customer_id!==value.customerId)throw Object.assign(new Error('Choose a computer belonging to this customer.'),{status:400});}}
 const notificationBusy=new Set();
 const networkBusy=new Set();
 const directoryBusy=new Set();
@@ -183,6 +199,42 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/api/logout') { sessions.delete(current.id); res.setHeader('Set-Cookie', cookie('', 0)); return reply(res, 200, { ok: true }); }
       if (req.method === 'GET' && url.pathname === '/api/inventory') return reply(res, 200, { ...snapshot, ...catalog(db) });
       if (req.method === 'POST' && url.pathname === '/api/sync') { await synchronize(); return reply(res, snapshot.error ? 502 : 200, snapshot.error ? { error: snapshot.error } : { ok:true }); }
+      if(req.method==='GET' && url.pathname==='/api/tickets'){
+        const query=(url.searchParams.get('q')||'').slice(0,180),status=url.searchParams.get('status')||'',filters=["t.deleted_at IS NULL"],args=[];if(status){if(!['open','in_progress','resolved'].includes(status))return reply(res,400,{error:'Invalid ticket status.'});filters.push('t.status=?');args.push(status);}if(query){filters.push('(t.title LIKE ? OR t.description LIKE ? OR c.name LIKE ? OR CAST(t.number AS TEXT)=?)');args.push('%'+query+'%','%'+query+'%','%'+query+'%',query.replace(/^SB-/,''));}
+        const rows=db.prepare('SELECT t.*,c.name AS customer FROM tickets t LEFT JOIN customers c ON c.id=t.customer_id WHERE '+filters.join(' AND ')+' ORDER BY t.updated_at DESC LIMIT 500').all(...args);
+        const counts=db.prepare('SELECT status,COUNT(*) AS count FROM tickets WHERE deleted_at IS NULL GROUP BY status').all();return reply(res,200,{tickets:rows.map(t=>({...t,ai:JSON.parse(t.ai),aiRunning:ticketAIBusy.has(t.id)})),counts,limited:rows.length===500});
+      }
+      if(req.method==='GET' && url.pathname==='/api/ticket'){
+        const ticket=ticketRecord(url.searchParams.get('id'));if(!ticket)return reply(res,404,{error:'Ticket not found.'});return reply(res,200,{...ticket,ai:JSON.parse(ticket.ai),aiRunning:ticketAIBusy.has(ticket.id),aiJob:db.prepare('SELECT status,detail FROM ticket_ai_jobs WHERE ticket_id=?').get(ticket.id),messages:db.prepare('SELECT * FROM ticket_messages WHERE ticket_id=? ORDER BY at').all(ticket.id)});
+      }
+      if(req.method==='POST' && url.pathname==='/api/ticket-config'){
+        const input=await body(req);if(ticketConfigBusy||ticketMailBusy||ticketAIBusy.size)return reply(res,409,{error:'Wait for the mailbox check or AI review to finish before changing settings.'});
+        const text=(name,max)=>{if(typeof input[name]!=='string'||input[name].length>max||/[\x00-\x1f]/.test(input[name]))throw Object.assign(new Error('Enter valid ticket integration settings.'),{status:400});return input[name].trim();};
+        const address=text('address',254),host=text('host',253),user=text('user',254)||address,folder=text('folder',120)||'INBOX',password=text('password',1000),apiKey=text('apiKey',1000),model=text('model',120)||'gpt-4.1-mini';
+        if(typeof input.emailEnabled!=='boolean'||typeof input.autoAI!=='boolean'||typeof input.clearAI!=='boolean')return reply(res,400,{error:'Choose valid integration settings.'});
+        const next={...ticketConfig,SUPPORT_EMAIL:address,TICKET_EMAIL_PROVIDER:'imap',TICKET_IMAP_HOST:host,TICKET_IMAP_USER:user,TICKET_IMAP_FOLDER:folder,TICKET_IMAP_PASSWORD:password||ticketSetting('TICKET_IMAP_PASSWORD')||'',TICKET_EMAIL_ENABLED:input.emailEnabled?'true':'false',OPENAI_API_KEY:input.clearAI?'':apiKey||ticketSetting('OPENAI_API_KEY')||'',TICKET_AI_MODEL:model,TICKET_AI_AUTO:input.autoAI?'true':'false'};
+        const candidate=new TicketMailbox(k=>next[k]);if(input.emailEnabled&&!candidate.configured)return reply(res,400,{error:'Enter a valid support email, IMAP hostname, and mailbox password.'});if(input.autoAI&&!next.OPENAI_API_KEY)return reply(res,400,{error:'An OpenAI API key is required for automatic reviews.'});
+        const changedMailbox=next.SUPPORT_EMAIL!==ticketMailbox.address||next.TICKET_IMAP_HOST!==ticketMailbox.host||next.TICKET_IMAP_FOLDER!==ticketMailbox.folder;
+        ticketConfigBusy=true;try{const temporary=resolve(dataDir,'.ticketing-'+randomBytes(16).toString('hex')+'.tmp');try{await writeFile(temporary,JSON.stringify(next,null,2),{mode:0o600,flag:'wx'});await rename(temporary,ticketConfigPath);}finally{await unlink(temporary).catch(()=>{});}
+        ticketConfig=next;ticketMailbox=new TicketMailbox(ticketSetting);ticketAI=new TicketAI(ticketSetting);ticketMailState={checkedAt:null,error:null,imported:0,limited:false};
+        if(changedMailbox){const key='mail-cursor:'+ticketMailbox.provider+':'+ticketMailbox.address.toLowerCase();db.prepare('DELETE FROM ticket_settings WHERE id=?').run(key);}
+        audit('ticket-integration-configured',ticketMailbox.address||'not-configured');return reply(res,200,{ok:true});}finally{ticketConfigBusy=false;if(ticketMailbox.configured)void syncTicketMail().catch(()=>{});if(ticketAI.auto&&ticketAI.configured)void drainTicketAI().catch(()=>{});}
+      }
+      if(req.method==='GET' && url.pathname==='/api/ticket-integrations')return reply(res,200,{email:{provider:ticketMailbox.provider,address:ticketMailbox.address,host:ticketMailbox.host,user:ticketMailbox.user,folder:ticketMailbox.folder,passwordSaved:!!ticketMailbox.password,configured:ticketMailbox.configured,enabled:ticketMailbox.enabled,running:ticketMailBusy,...ticketMailState},ai:{configured:ticketAI.configured,auto:ticketAI.auto,model:ticketAI.model}});
+      if(req.method==='POST' && url.pathname==='/api/ticket-mail-sync'){await body(req);return reply(res,200,await syncTicketMail());}
+      if(req.method==='POST' && url.pathname==='/api/ticket-save'){
+        const input=await body(req),previous=input.id?ticketRecord(input.id):null;if(input.id&&!previous)return reply(res,404,{error:'Ticket not found.'});const value=ticketInput(input,previous?{...previous,customerId:previous.customer_id||'',nodeId:previous.node_id,requesterEmail:previous.requester_email}:{});validateTicketLinks(value);
+        if(previous){db.prepare("UPDATE tickets SET title=?,description=?,customer_id=?,node_id=?,requester_email=?,priority=?,category=?,status=?,assignee=?,updated_at=?,ai='{}' WHERE id=?").run(value.title,value.description,value.customerId||null,value.nodeId,value.requesterEmail,value.priority,value.category,value.status,value.assignee,new Date().toISOString(),input.id);audit('ticket-updated',input.id);return reply(res,200,{id:input.id});}
+        const created=createTicket(db,value);audit('ticket-created',created.id);return reply(res,201,created);
+      }
+      if(req.method==='POST' && ['/api/ticket-status','/api/ticket-delete','/api/ticket-note','/api/ticket-review'].includes(url.pathname)){
+        const input=await body(req),ticket=typeof input.id==='string'?ticketRecord(input.id):null;if(!ticket)return reply(res,404,{error:'Ticket not found.'});const at=new Date().toISOString();
+        if(url.pathname==='/api/ticket-review')return reply(res,200,await reviewTicket(input.id));
+        if(url.pathname==='/api/ticket-delete'){if(input.confirm!==true)return reply(res,400,{error:'Confirm ticket deletion.'});db.prepare('UPDATE tickets SET deleted_at=?,updated_at=? WHERE id=?').run(at,at,input.id);audit('ticket-deleted',input.id);}
+        else if(url.pathname==='/api/ticket-status'){if(!['open','in_progress','resolved'].includes(input.status))return reply(res,400,{error:'Choose a valid ticket status.'});db.prepare('UPDATE tickets SET status=?,updated_at=? WHERE id=?').run(input.status,at,input.id);audit('ticket-status-changed',input.id);}
+        else{if(typeof input.note!=='string'||!input.note.trim()||input.note.length>10000)return reply(res,400,{error:'Enter a note of 1–10,000 characters.'});db.prepare('INSERT INTO ticket_messages VALUES (?,?,?,?,?,?)').run(randomBytes(16).toString('hex'),input.id,input.note.trim(),username,'internal',at);db.prepare("UPDATE tickets SET updated_at=?,ai='{}' WHERE id=?").run(at,input.id);audit('ticket-note-added',input.id);}
+        return reply(res,200,{ok:true});
+      }
       if(req.method==='POST' && url.pathname==='/api/telemetry'){
         const input=await body(req);await synchronize();
         if(snapshot.error)return reply(res,502,{error:snapshot.error});
@@ -356,6 +408,7 @@ const server = http.createServer(async (req, res) => {
         const input=await body(req);if(input.confirm!==true||typeof input.id!=='string')return reply(res,400,{error:'Confirm deletion of this empty record.'});
         if(url.pathname==='/api/customer-delete'){
           if(!db.prepare('SELECT id FROM customers WHERE id=?').get(input.id))return reply(res,404,{error:'Customer not found.'});
+          if(db.prepare('SELECT id FROM tickets WHERE customer_id=?').get(input.id))return reply(res,409,{error:'This customer has ticket records. Keep the customer to preserve support history.'});
           if(db.prepare('SELECT id FROM companies WHERE customer_id=?').get(input.id))return reply(res,409,{error:'This customer has linked companies. Reassign those companies before deleting the customer.'});
           db.prepare('DELETE FROM customers WHERE id=?').run(input.id);audit('customer-deleted',input.id);return reply(res,200,{ok:true});
         }
@@ -495,5 +548,7 @@ const server = http.createServer(async (req, res) => {
     reply(res, error.status || 502, { error: safe ? error.message : 'Operation failed. Check the integration configuration and account permissions.' });
   }
 });
+if(ticketAI.configured&&ticketAI.auto)void drainTicketAI().catch(()=>{});
+const ticketMailPoll=setInterval(()=>{if(ticketMailbox.configured)syncTicketMail().catch(()=>{});},60000);ticketMailPoll.unref();if(ticketMailbox.configured)syncTicketMail().catch(()=>{});
 server.listen(Number(process.env.PORT || 3001), process.env.BIND_ADDRESS || '127.0.0.1', () => console.log('Maldoori live backend listening on port ' + (process.env.PORT || 3001)));
-for (const signal of ['SIGTERM','SIGINT']) process.on(signal, () => { clearInterval(poll); clearInterval(cleanup); server.close(() => { db.close(); process.exit(0); }); });
+for (const signal of ['SIGTERM','SIGINT']) process.on(signal, () => { clearTimeout(ticketAutoTimer);clearInterval(ticketMailPoll);clearInterval(poll); clearInterval(cleanup); server.close(() => { db.close(); process.exit(0); }); });
