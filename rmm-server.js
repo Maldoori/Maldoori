@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {AgentStore,AgentAI} from './lib/ai-agents.js';
 import {initializeTickets,ticketInput,createTicket,importTicketEmail} from './lib/tickets.js';
 import {TicketMailbox,TicketAI} from './lib/ticket-integrations.js';
 import {directoryCommand,parseDirectory} from './lib/active-directory.js';
@@ -55,6 +56,8 @@ const ticketConfigPath=resolve(dataDir,'ticketing-credentials.json');let ticketC
 try{const metadata=await lstat(ticketConfigPath);if(!metadata.isFile()||(metadata.mode&0o077))throw new Error('Ticketing credentials must be an owner-only regular file (chmod 600).');ticketConfig=JSON.parse(await readFile(ticketConfigPath,'utf8'));if(!ticketConfig||typeof ticketConfig!=='object'||Array.isArray(ticketConfig))throw new Error('Invalid ticketing credentials file.');}catch(error){if(error.code!=='ENOENT')throw error;}
 const ticketSetting=name=>ticketConfig[name]??setting(name);
 let ticketMailbox=new TicketMailbox(ticketSetting),ticketAI=new TicketAI(ticketSetting);const ticketAIBusy=new Set();let ticketConfigBusy=false,ticketMailBusy=false,ticketMailState={checkedAt:null,error:null,imported:0,limited:false};
+const agentStore=await AgentStore.open(resolve(dataDir,'ai-agents.json'),()=>{const old=new TicketAI(ticketSetting);return old.configured?old:null;});
+function refreshTicketAI(){ticketAI=new AgentAI(agentStore.defaultAgent());}refreshTicketAI();
 function ticketRecord(id){return db.prepare('SELECT * FROM tickets WHERE id=? AND deleted_at IS NULL').get(id);}
 async function reviewTicket(id){if(ticketConfigBusy)throw Object.assign(new Error('Ticket integration settings are being saved.'),{status:409});const ticket=ticketRecord(id);if(!ticket)throw Object.assign(new Error('Ticket not found.'),{status:404});if(ticketAIBusy.size)throw Object.assign(new Error('An AI review is running. Try again after it completes.'),{status:409});ticketAIBusy.add(id);audit('ticket-ai-review-requested',id);try{const messages=db.prepare('SELECT body FROM ticket_messages WHERE ticket_id=? ORDER BY at').all(id);const review=await ticketAI.review(ticket,messages);const current=ticketRecord(id);if(!current||current.updated_at!==ticket.updated_at)throw Object.assign(new Error('The ticket changed during AI review. Review the current ticket again.'),{status:409});db.prepare('UPDATE tickets SET ai=? WHERE id=?').run(JSON.stringify(review),id);db.prepare("UPDATE ticket_ai_jobs SET status='completed',detail='' WHERE ticket_id=?").run(id);audit('ticket-ai-reviewed',id);return review;}finally{ticketAIBusy.delete(id);}}
 let ticketAutoReviewRunning=false,ticketAutoTimer;
@@ -199,6 +202,18 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/api/logout') { sessions.delete(current.id); res.setHeader('Set-Cookie', cookie('', 0)); return reply(res, 200, { ok: true }); }
       if (req.method === 'GET' && url.pathname === '/api/inventory') return reply(res, 200, { ...snapshot, ...catalog(db) });
       if (req.method === 'POST' && url.pathname === '/api/sync') { await synchronize(); return reply(res, snapshot.error ? 502 : 200, snapshot.error ? { error: snapshot.error } : { ok:true }); }
+      if(req.method==='GET'&&url.pathname==='/api/ai-agents')return reply(res,200,agentStore.list());
+      if(req.method==='POST'&&['/api/ai-agent-save','/api/ai-agent-delete','/api/ai-agent-default','/api/ai-agent-test'].includes(url.pathname)){
+        const input=await body(req);if(ticketConfigBusy||ticketAIBusy.size)return reply(res,409,{error:'Wait for the current AI operation or settings change to finish.'});ticketConfigBusy=true;
+        try{let result={ok:true};
+          if(url.pathname==='/api/ai-agent-save')result=await agentStore.save(input);
+          else{if(typeof input.id!=='string')return reply(res,400,{error:'Choose an AI agent.'});
+            if(url.pathname==='/api/ai-agent-delete'){if(input.confirm!==true)return reply(res,400,{error:'Confirm deletion of this agent.'});await agentStore.remove(input.id);}
+            else if(url.pathname==='/api/ai-agent-default')await agentStore.choose(input.id);
+            else{const agent=agentStore.snapshot().agents.find(a=>a.id===input.id);if(!agent)return reply(res,404,{error:'AI agent not found.'});try{result=await new AgentAI(agent).test();await agentStore.recordTest(input.id,result);}catch(error){await agentStore.recordTest(input.id,{ok:false,detail:error.status?error.message:'AI connection test failed.'});throw error;}}
+          }refreshTicketAI();audit('ai-agent-'+url.pathname.split('-').at(-1),result.id||input.id);return reply(res,200,result);
+        }finally{ticketConfigBusy=false;if(ticketAI.configured&&ticketAI.auto)void drainTicketAI().catch(()=>{});}
+      }
       if(req.method==='GET' && url.pathname==='/api/tickets'){
         const query=(url.searchParams.get('q')||'').slice(0,180),status=url.searchParams.get('status')||'',filters=["t.deleted_at IS NULL"],args=[];if(status){if(!['open','in_progress','resolved'].includes(status))return reply(res,400,{error:'Invalid ticket status.'});filters.push('t.status=?');args.push(status);}if(query){filters.push('(t.title LIKE ? OR t.description LIKE ? OR c.name LIKE ? OR CAST(t.number AS TEXT)=?)');args.push('%'+query+'%','%'+query+'%','%'+query+'%',query.replace(/^SB-/,''));}
         const rows=db.prepare('SELECT t.*,c.name AS customer FROM tickets t LEFT JOIN customers c ON c.id=t.customer_id WHERE '+filters.join(' AND ')+' ORDER BY t.updated_at DESC LIMIT 500').all(...args);
@@ -213,14 +228,14 @@ const server = http.createServer(async (req, res) => {
         const address=text('address',254),host=text('host',253),user=text('user',254)||address,folder=text('folder',120)||'INBOX',password=text('password',1000),apiKey=text('apiKey',1000),model=text('model',120)||'gpt-4.1-mini';
         if(typeof input.emailEnabled!=='boolean'||typeof input.autoAI!=='boolean'||typeof input.clearAI!=='boolean')return reply(res,400,{error:'Choose valid integration settings.'});
         const next={...ticketConfig,SUPPORT_EMAIL:address,TICKET_EMAIL_PROVIDER:'imap',TICKET_IMAP_HOST:host,TICKET_IMAP_USER:user,TICKET_IMAP_FOLDER:folder,TICKET_IMAP_PASSWORD:password||ticketSetting('TICKET_IMAP_PASSWORD')||'',TICKET_EMAIL_ENABLED:input.emailEnabled?'true':'false',OPENAI_API_KEY:input.clearAI?'':apiKey||ticketSetting('OPENAI_API_KEY')||'',TICKET_AI_MODEL:model,TICKET_AI_AUTO:input.autoAI?'true':'false'};
-        const candidate=new TicketMailbox(k=>next[k]);if(input.emailEnabled&&!candidate.configured)return reply(res,400,{error:'Enter a valid support email, IMAP hostname, and mailbox password.'});if(input.autoAI&&!next.OPENAI_API_KEY)return reply(res,400,{error:'An OpenAI API key is required for automatic reviews.'});
+        const candidate=new TicketMailbox(k=>next[k]);if(input.emailEnabled&&!candidate.configured)return reply(res,400,{error:'Enter a valid support email, IMAP hostname, and mailbox password.'});if(input.autoAI&&!agentStore.data&&!next.OPENAI_API_KEY)return reply(res,400,{error:'An OpenAI API key is required for automatic reviews.'});
         const changedMailbox=next.SUPPORT_EMAIL!==ticketMailbox.address||next.TICKET_IMAP_HOST!==ticketMailbox.host||next.TICKET_IMAP_FOLDER!==ticketMailbox.folder;
         ticketConfigBusy=true;try{const temporary=resolve(dataDir,'.ticketing-'+randomBytes(16).toString('hex')+'.tmp');try{await writeFile(temporary,JSON.stringify(next,null,2),{mode:0o600,flag:'wx'});await rename(temporary,ticketConfigPath);}finally{await unlink(temporary).catch(()=>{});}
-        ticketConfig=next;ticketMailbox=new TicketMailbox(ticketSetting);ticketAI=new TicketAI(ticketSetting);ticketMailState={checkedAt:null,error:null,imported:0,limited:false};
+        ticketConfig=next;ticketMailbox=new TicketMailbox(ticketSetting);refreshTicketAI();ticketMailState={checkedAt:null,error:null,imported:0,limited:false};
         if(changedMailbox){const key='mail-cursor:'+ticketMailbox.provider+':'+ticketMailbox.address.toLowerCase();db.prepare('DELETE FROM ticket_settings WHERE id=?').run(key);}
         audit('ticket-integration-configured',ticketMailbox.address||'not-configured');return reply(res,200,{ok:true});}finally{ticketConfigBusy=false;if(ticketMailbox.configured)void syncTicketMail().catch(()=>{});if(ticketAI.auto&&ticketAI.configured)void drainTicketAI().catch(()=>{});}
       }
-      if(req.method==='GET' && url.pathname==='/api/ticket-integrations')return reply(res,200,{email:{provider:ticketMailbox.provider,address:ticketMailbox.address,host:ticketMailbox.host,user:ticketMailbox.user,folder:ticketMailbox.folder,passwordSaved:!!ticketMailbox.password,configured:ticketMailbox.configured,enabled:ticketMailbox.enabled,running:ticketMailBusy,...ticketMailState},ai:{configured:ticketAI.configured,auto:ticketAI.auto,model:ticketAI.model}});
+      if(req.method==='GET' && url.pathname==='/api/ticket-integrations')return reply(res,200,{email:{provider:ticketMailbox.provider,address:ticketMailbox.address,host:ticketMailbox.host,user:ticketMailbox.user,folder:ticketMailbox.folder,passwordSaved:!!ticketMailbox.password,configured:ticketMailbox.configured,enabled:ticketMailbox.enabled,running:ticketMailBusy,...ticketMailState},ai:{configured:ticketAI.configured,auto:ticketAI.auto,model:ticketAI.model,agentName:ticketAI.agent?.name||'',provider:ticketAI.agent?.provider||''}});
       if(req.method==='POST' && url.pathname==='/api/ticket-mail-sync'){await body(req);return reply(res,200,await syncTicketMail());}
       if(req.method==='POST' && url.pathname==='/api/ticket-save'){
         const input=await body(req),previous=input.id?ticketRecord(input.id):null;if(input.id&&!previous)return reply(res,404,{error:'Ticket not found.'});const value=ticketInput(input,previous?{...previous,customerId:previous.customer_id||'',nodeId:previous.node_id,requesterEmail:previous.requester_email}:{});validateTicketLinks(value);
