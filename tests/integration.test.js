@@ -203,6 +203,11 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('security-provider',{companyId:emptyCompany,provider:''})).status,200);
   assert.equal((await api('company-delete',{id:emptyCompany,confirm:true})).status,200);
   assert.ok((await api('inventory')).data.groups.some(g=>g.id===emptyCompany));
+  const customBackup=await api('provider-save',{kind:'backup',name:'Custom cloud backup',adapter:'console',consoleUrl:'https://backup.example.com/',guidance:'Install vendor agent'});assert.equal(customBackup.status,200);const customBackupId=customBackup.data.id;
+  const customAV=await api('provider-save',{kind:'security',name:'Custom endpoint protection',adapter:'console',consoleUrl:'https://security.example.com/',guidance:'Apply protection policy'});assert.equal(customAV.status,200);const customAVId=customAV.data.id;
+  assert.equal((await api('backup-provider',{companyId,provider:customBackupId})).status,200);assert.equal((await api('provider-delete',{kind:'backup',id:customBackupId,confirm:true})).status,409);
+  assert.equal((await api('backup-provider',{companyId,provider:'comet'})).status,200);assert.equal((await api('security-provider',{companyId,provider:customAVId})).status,200);assert.equal((await api('security-provider',{companyId,provider:'bitdefender'})).status,200);
+  const validation=await api('provider-test',{kind:'backup',id:customBackupId});assert.equal(validation.status,200);assert.match(validation.data.detail,/No API/);
   const emptyCustomer=(await api('customers',{name:'Disposable customer'})).data.id;
   assert.equal((await api('customer-delete',{id:emptyCustomer})).status,400);
   assert.equal((await api('customer-delete',{id:emptyCustomer,confirm:true})).status,200);
@@ -217,6 +222,7 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   assert.equal((await api('backup-provider',{companyId,provider:'comet'})).status,200);
 
   assert.equal((await api('ticket?id='+ticketId)).data.status,'in_progress');
+  assert.ok((await api('provider-registry')).data.backup.some(p=>p.id===customBackupId));
   const restored=(await api('inventory')).data;assert.equal(restored.customers.find(c=>c.id===customerId).email,'support@skybase.example');assert.equal(restored.companies.length,2);assert.equal(restored.devices.find(d=>d.name==='NEW-PC').online,false);assert.equal(restored.devices.length,3);
   if (process.env.BROWSER_TEST_MODULE) {
     const {chromium}=await import(process.env.BROWSER_TEST_MODULE);
@@ -288,6 +294,11 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
       assert.equal(new URL(page.url()).hash,'#network');await page.locator('#network-device-list').getByText('Office printer',{exact:true}).waitFor();
       await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-network-scan.png',fullPage:true});
       await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});
+      await page.locator('[data-page="providers"]').click();await page.locator('#provider-registry-list').getByText('Custom cloud backup',{exact:true}).waitFor();await page.locator('#provider-add').click();await page.locator('#provider-registry-form [name="name"]').fill('Browser backup vendor');await page.locator('#provider-registry-form [name="consoleUrl"]').fill('https://browser-backup.example/');await page.locator('#provider-registry-form button.primary').click();await page.locator('#provider-registry-list').getByText('Browser backup vendor',{exact:true}).waitFor();
+      const vendorCard=page.locator('#provider-registry-list .organisation-card').filter({has:page.getByText('Browser backup vendor',{exact:true})});await vendorCard.locator('[data-provider-edit]').click();await page.locator('#provider-registry-form [name="name"]').fill('Browser backup renamed');await page.locator('#provider-registry-form button.primary').click();await page.locator('#provider-registry-list').getByText('Browser backup renamed',{exact:true}).waitFor();
+      await page.setViewportSize({width:1660,height:1000});await page.screenshot({path:'/tmp/skybase-provider-setup.png',fullPage:true});await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});
+      await page.locator('#provider-registry-list .organisation-card').filter({has:page.getByText('Browser backup renamed',{exact:true})}).locator('[data-provider-delete]').click();await page.locator('#provider-delete-confirm').click();await page.locator('#modal').waitFor({state:'hidden'});
+      await page.locator('[data-provider-kind="security"]').click();await page.locator('#provider-registry-list').getByText('Custom endpoint protection',{exact:true}).waitFor();
       await page.locator('[data-page="ai"]').click();await page.locator('#ai-agent-list').getByText('No AI agents configured. Add an agent with your provider API key.').waitFor();await page.locator('#ai-add').click();await page.locator('#agent-provider').selectOption('azure');await page.locator('#agent-endpoint-label').waitFor({state:'visible'});await page.screenshot({path:'/tmp/skybase-ai-agent-form.png',fullPage:true});assert.equal(await page.locator('#ai-agent-form [name="apiKey"]').inputValue(),'');await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.setViewportSize({width:1560,height:960});await page.locator('#modal [data-close]').first().click();
       await page.locator('[data-page="tickets"]').click();
       await page.locator('#ticket-list').getByText('Printer offline',{exact:true}).waitFor();

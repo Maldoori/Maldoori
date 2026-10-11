@@ -1,4 +1,5 @@
 import http from 'node:http';
+import {initializeProviders,ProviderRegistry,consoleURL} from './lib/providers.js';
 import {AgentStore,AgentAI} from './lib/ai-agents.js';
 import {initializeTickets,ticketInput,createTicket,importTicketEmail} from './lib/tickets.js';
 import {TicketMailbox,TicketAI} from './lib/ticket-integrations.js';
@@ -32,8 +33,7 @@ const username = setting('RMM_USERNAME') || 'admin';
 if (typeof setting('RMM_PASSWORD') !== 'string' || setting('RMM_PASSWORD').length < 16) throw new Error('Set RMM_PASSWORD to a unique password of at least 16 characters.');
 const salt = randomBytes(32), passwordHash = scryptSync(setting('RMM_PASSWORD'), salt, 64);
 const mesh = new MeshClient({ url: setting('MESH_URL'), username: setting('MESH_USERNAME'), password: setting('MESH_PASSWORD') });
-const acronis=new AcronisClient({url:setting('ACRONIS_URL'),clientId:setting('ACRONIS_CLIENT_ID'),secret:setting('ACRONIS_CLIENT_SECRET')});
-let acronisConnection={configured:acronis.configured,authenticated:false,backupStatusVerified:false};
+let acronis,acronisConnection={configured:false,authenticated:false,backupStatusVerified:false};
 const dataDir = resolve(process.env.DATA_DIR || resolve(root, 'data'));
 await mkdir(dataDir, { recursive: true, mode: 0o700 });
 const db = new DatabaseSync(resolve(dataDir, 'rmm.sqlite'));
@@ -44,11 +44,11 @@ db.exec('CREATE TABLE IF NOT EXISTS device_preferences(id TEXT PRIMARY KEY,name 
 const telemetryCache=new Map(),telemetryBusy=new Map();
 db.exec('CREATE TABLE IF NOT EXISTS acronis_links(node_id TEXT PRIMARY KEY,resource_id TEXT NOT NULL UNIQUE,tenant_id TEXT NOT NULL)');
 db.exec("CREATE TABLE IF NOT EXISTS backup_preferences(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('acronis','comet','msp360'))); CREATE TABLE IF NOT EXISTS backup_settings(id TEXT PRIMARY KEY,value TEXT NOT NULL)");
-// Extend the provider constraint without losing saved company selections.
-if(!db.prepare("SELECT sql FROM sqlite_master WHERE name='backup_preferences'").get().sql.includes("'msp360'")){
-  db.exec("BEGIN; CREATE TABLE backup_preferences_next(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('acronis','comet','msp360'))); INSERT INTO backup_preferences_next SELECT * FROM backup_preferences; DROP TABLE backup_preferences; ALTER TABLE backup_preferences_next RENAME TO backup_preferences; COMMIT;");
-}
 db.exec("CREATE TABLE IF NOT EXISTS security_preferences(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('bitdefender','defender','acronis'))); CREATE TABLE IF NOT EXISTS security_settings(provider TEXT PRIMARY KEY CHECK(provider IN ('bitdefender','defender','acronis')),console_url TEXT NOT NULL)");
+initializeProviders(db,{url:setting('ACRONIS_URL'),clientId:setting('ACRONIS_CLIENT_ID')});
+const providerRegistry=await ProviderRegistry.open(db,resolve(dataDir,'provider-credentials.json'),{url:setting('ACRONIS_URL'),clientId:setting('ACRONIS_CLIENT_ID'),secret:setting('ACRONIS_CLIENT_SECRET')});let providerBusy=false;
+function refreshAcronisProvider(){const row=db.prepare("SELECT * FROM integration_providers WHERE adapter='acronis-backup' LIMIT 1").get();acronis=new AcronisClient(row?providerRegistry.credentials(row):{});acronisConnection={configured:acronis.configured,authenticated:false,backupStatusVerified:false};}
+refreshAcronisProvider();
 initializePatches(db);
 db.exec("CREATE TABLE IF NOT EXISTS patch_notifications(id INTEGER PRIMARY KEY,patch_id TEXT NOT NULL REFERENCES patches(id) ON DELETE CASCADE,node_id TEXT NOT NULL,message TEXT NOT NULL,at TEXT NOT NULL)");
 initializeTickets(db);
@@ -81,6 +81,7 @@ db.exec("UPDATE patch_notice_targets SET status='uncertain',detail='Server resta
 
 let acronisInventory={resources:[],tasks:[],backupResults:[],checkedAt:null,error:null},acronisSync;
 function syncAcronis(){
+  if(providerBusy)return Promise.resolve();
   if(acronisSync)return acronisSync;
   acronisSync=acronis.inventory().then(value=>{acronisInventory={...value,error:null};}).catch(error=>{acronisInventory.error=error.message;}).finally(()=>acronisSync=null);
   return acronisSync;
@@ -202,6 +203,19 @@ const server = http.createServer(async (req, res) => {
       if (req.method === 'POST' && url.pathname === '/api/logout') { sessions.delete(current.id); res.setHeader('Set-Cookie', cookie('', 0)); return reply(res, 200, { ok: true }); }
       if (req.method === 'GET' && url.pathname === '/api/inventory') return reply(res, 200, { ...snapshot, ...catalog(db) });
       if (req.method === 'POST' && url.pathname === '/api/sync') { await synchronize(); return reply(res, snapshot.error ? 502 : 200, snapshot.error ? { error: snapshot.error } : { ok:true }); }
+      if(req.method==='POST'&&url.pathname==='/api/provider-console'){
+        const input=await body(req);if(providerBusy)return reply(res,409,{error:'Provider settings are being updated.'});if(!['backup','security'].includes(input.kind)||typeof input.provider!=='string'||!providerRegistry.row(input.kind,input.provider))return reply(res,404,{error:'Provider not found.'});const url=consoleURL(input.consoleUrl);db.prepare("UPDATE integration_providers SET console_url=?,test_status='untested',test_detail='',tested_at=NULL WHERE kind=? AND id=?").run(url,input.kind,input.provider);audit('provider-console-configured',input.kind+':'+input.provider);return reply(res,200,{ok:true});
+      }
+      if(req.method==='GET'&&url.pathname==='/api/provider-registry')return reply(res,200,{backup:providerRegistry.list('backup'),security:providerRegistry.list('security'),adapters:[{id:'console',name:'Console only',kinds:['backup','security']},{id:'acronis-backup',name:'Acronis backup API',kinds:['backup']}]});
+      if(req.method==='POST'&&['/api/provider-save','/api/provider-delete','/api/provider-test'].includes(url.pathname)){
+        const input=await body(req);if(providerBusy||acronisSync)return reply(res,409,{error:'Wait for the current provider operation to finish.'});providerBusy=true;const altersAcronis=input.kind==='backup'&&(input.adapter==='acronis-backup'||providerRegistry.row('backup',input.id||'')?.adapter==='acronis-backup');
+        try{let result={ok:true};if(url.pathname==='/api/provider-save')result=await providerRegistry.save(input);
+          else{if(!['backup','security'].includes(input.kind)||typeof input.id!=='string')return reply(res,400,{error:'Choose a provider.'});const row=providerRegistry.row(input.kind,input.id);if(!row)return reply(res,404,{error:'Provider not found.'});
+            if(url.pathname==='/api/provider-delete'){if(input.confirm!==true)return reply(res,400,{error:'Confirm deletion of this provider.'});await providerRegistry.remove(input.kind,input.id);}
+            else{try{if(row.adapter==='acronis-backup'){await new AcronisClient(providerRegistry.credentials(row)).authenticate();result={ok:true,detail:'Acronis API authentication verified. Backup results require inventory and device links.'};}else{if(!row.console_url)return reply(res,400,{error:'Add a management console URL first.'});consoleURL(row.console_url);result={ok:true,detail:'Console URL format validated. No API connection or protection status was verified.'};}providerRegistry.recordTest(input.kind,input.id,result);}catch(error){providerRegistry.recordTest(input.kind,input.id,{ok:false,detail:error.message.startsWith('Acronis')||error.message.startsWith('Cannot connect')?error.message:'Provider connection failed.'});throw error;}}
+          }if(altersAcronis&&url.pathname!=='/api/provider-test'){refreshAcronisProvider();acronisInventory={resources:[],tasks:[],backupResults:[],checkedAt:null,error:null};}audit('provider-'+url.pathname.split('-').at(-1),input.kind+':'+(result.id||input.id));return reply(res,200,result);
+        }finally{providerBusy=false;}
+      }
       if(req.method==='GET'&&url.pathname==='/api/ai-agents')return reply(res,200,agentStore.list());
       if(req.method==='POST'&&['/api/ai-agent-save','/api/ai-agent-delete','/api/ai-agent-default','/api/ai-agent-test'].includes(url.pathname)){
         const input=await body(req);if(ticketConfigBusy||ticketAIBusy.size)return reply(res,409,{error:'Wait for the current AI operation or settings change to finish.'});ticketConfigBusy=true;
@@ -362,34 +376,35 @@ const server = http.createServer(async (req, res) => {
           if(jobId){db.prepare("INSERT INTO patch_notice_jobs VALUES (?,?,?,?, 'running')").run(jobId,patch.id,input.companyId,at);for(const d of devices)db.prepare('INSERT INTO patch_notice_targets VALUES (?,?,?,?,?)').run(jobId,d.id,d.name,d.online?'queued':'offline',d.online?'Waiting to send.':'Computer is offline. No notice is queued for later delivery.');}db.exec('COMMIT');}catch(error){db.exec('ROLLBACK');throw error;}
         audit('patch-rollout-planned',input.patchId);if(jobId)startCompanyNotice(jobId,devices,patch,notice);return reply(res,200,{ok:true,planned:devices.length,executed:false,jobId});
       }
-      if(req.method==='GET' && url.pathname==='/api/security')return reply(res,200,{preferences:db.prepare('SELECT * FROM security_preferences').all(),providers:['bitdefender','defender','acronis'].map(id=>({id,consoleUrl:db.prepare('SELECT console_url FROM security_settings WHERE provider=?').get(id)?.console_url||(id==='acronis'&&acronis.configured?acronis.url.href:null),protectionVerified:false,apiConnected:false}))});
+      if(req.method==='GET' && url.pathname==='/api/security')return reply(res,200,{preferences:db.prepare('SELECT * FROM security_preferences').all(),providers:providerRegistry.list('security')});
       if(req.method==='POST' && url.pathname==='/api/security-provider'){
         const input=await body(req);
         if(typeof input.companyId!=='string'||!db.prepare('SELECT id FROM companies WHERE id=?').get(input.companyId))return reply(res,404,{error:'Company not found.'});
-        if(!['bitdefender','defender','acronis',''].includes(input.provider))return reply(res,400,{error:'Choose a supported security provider.'});
+        if(typeof input.provider!=='string'||input.provider&&!providerRegistry.row('security',input.provider))return reply(res,400,{error:'Choose a supported security provider.'});
         if(input.provider)db.prepare('INSERT INTO security_preferences(company_id,provider) VALUES (?,?) ON CONFLICT(company_id) DO UPDATE SET provider=excluded.provider').run(input.companyId,input.provider);
         else db.prepare('DELETE FROM security_preferences WHERE company_id=?').run(input.companyId);
         audit('security-provider-selected',input.companyId);return reply(res,200,{ok:true});
       }
       if(req.method==='POST' && url.pathname==='/api/security-settings'){
-        const input=await body(req);if(!['bitdefender','defender','acronis'].includes(input.provider))return reply(res,400,{error:'Choose a supported security provider.'});
+        const input=await body(req);if(!providerRegistry.row('security',input.provider))return reply(res,400,{error:'Choose a supported security provider.'});
         if(typeof input.consoleUrl!=='string'||input.consoleUrl.length>1000)return reply(res,400,{error:'Enter a valid console URL.'});
         let consoleUrl='';if(input.consoleUrl){try{const value=new URL(input.consoleUrl);if(value.protocol!=='https:'||value.username||value.password||value.search||value.hash)throw new Error();consoleUrl=value.href;}catch{return reply(res,400,{error:'Use an HTTPS console URL without credentials, query parameters, or fragments.'});}}
-        db.prepare('INSERT INTO security_settings(provider,console_url) VALUES (?,?) ON CONFLICT(provider) DO UPDATE SET console_url=excluded.console_url').run(input.provider,consoleUrl);
+        db.prepare("UPDATE integration_providers SET console_url=?,test_status='untested',test_detail='',tested_at=NULL WHERE kind=? AND id=?").run(consoleUrl,'security',input.provider);
         audit('security-console-configured',input.provider);return reply(res,200,{ok:true});
       }
-      if(req.method==='GET' && url.pathname==='/api/backup-providers')return reply(res,200,{preferences:db.prepare('SELECT * FROM backup_preferences').all(),comet:{consoleUrl:db.prepare("SELECT value FROM backup_settings WHERE id='comet_console'").get()?.value||null,apiConnected:false},msp360:{consoleUrl:db.prepare("SELECT value FROM backup_settings WHERE id='msp360_console'").get()?.value||null,apiConnected:false}});
+      if(req.method==='GET' && url.pathname==='/api/backup-providers'){const providers=providerRegistry.list('backup');return reply(res,200,{preferences:db.prepare('SELECT * FROM backup_preferences').all(),providers,...Object.fromEntries(providers.map(p=>[p.id,{consoleUrl:p.consoleUrl,apiConnected:p.apiConnected}]))});}
       if(req.method==='POST' && url.pathname==='/api/backup-provider'){
         const input=await body(req);
         if(!db.prepare('SELECT id FROM companies WHERE id=?').get(input.companyId||''))return reply(res,404,{error:'Company not found.'});
-        if(!['acronis','comet','msp360'].includes(input.provider))return reply(res,400,{error:'Choose Acronis, Comet Backup, or MSP360.'});
+        if(typeof input.provider!=='string'||input.provider&&!providerRegistry.row('backup',input.provider))return reply(res,400,{error:'Choose a configured backup provider.'});if(!input.provider){db.prepare('DELETE FROM backup_preferences WHERE company_id=?').run(input.companyId);return reply(res,200,{ok:true});}
         db.prepare('INSERT INTO backup_preferences(company_id,provider) VALUES (?,?) ON CONFLICT(company_id) DO UPDATE SET provider=excluded.provider').run(input.companyId,input.provider);
         audit('backup-provider-selected',input.companyId);return reply(res,200,{ok:true});
       }
       if(req.method==='POST' && ['/api/comet-settings','/api/msp360-settings'].includes(url.pathname)){
-        const input=await body(req);const provider=url.pathname==='/api/comet-settings'?'comet':'msp360';let consoleUrl='';
+        const input=await body(req);const provider=url.pathname==='/api/comet-settings'?'comet':'msp360';let consoleUrl='';if(!providerRegistry.row('backup',provider))return reply(res,404,{error:'Provider not found.'});
         if(input.consoleUrl){try{const value=new URL(input.consoleUrl);if(value.protocol!=='https:'||value.username||value.password||value.search||value.hash)throw new Error();consoleUrl=value.href;}catch{return reply(res,400,{error:'Enter an HTTPS backup console URL without credentials, query parameters, or fragments.'});}}
         db.prepare("INSERT INTO backup_settings(id,value) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value").run(provider+'_console',consoleUrl);
+        db.prepare("UPDATE integration_providers SET console_url=?,test_status='untested',test_detail='',tested_at=NULL WHERE kind=? AND id=?").run(consoleUrl,'backup',provider);
         audit(provider+'-console-configured',provider);return reply(res,200,{ok:true});
       }
       if(req.method==='GET' && url.pathname==='/api/acronis-inventory'){
@@ -410,6 +425,7 @@ const server = http.createServer(async (req, res) => {
       }
       if(req.method==='GET' && url.pathname==='/api/acronis')return reply(res,200,acronisConnection);
       if(req.method==='POST' && url.pathname==='/api/acronis-connect'){
+        if(providerBusy)return reply(res,409,{error:'Provider settings are being updated.'});
         try{acronisConnection=await acronis.testConnection();audit('acronis-connection-tested','acronis');return reply(res,200,acronisConnection);}
         catch(error){acronisConnection={configured:acronis.configured,authenticated:false,backupStatusVerified:false,error:error.message};return reply(res,502,acronisConnection);}
       }
