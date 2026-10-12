@@ -1,8 +1,8 @@
-// SkyBase desktop privacy guard v1. Agent-side view/control approvals.
+// SkyBase desktop privacy guard v2. Agent-side view/control approvals.
 function skybasePrivacyMetadata(ws, phase) {
     if (!ws || !ws.skybasePrivacy || ws.skybasePrivacy.closed) return;
     ws.skybasePrivacy.phase = phase;
-    try { ws.write(JSON.stringify({ ctrlChannel: '102938', type: 'metadata', users: tunnelUserCount.desktop || {}, skybasePrivacy: { version: 1, phase: phase, canRequestControl: ws.skybasePrivacy.canControl } })); } catch (ex) { }
+    try { ws.write(JSON.stringify({ ctrlChannel: '102938', type: 'metadata', users: tunnelUserCount.desktop || {}, skybasePrivacy: { version: 1, phase: phase, canRequestControl: ws.skybasePrivacy.canControl, error: ws.skybasePrivacy.error || null } })); } catch (ex) { }
 }
 function skybasePrivacyBegin(ws) {
     var request = ws.httprequest;
@@ -11,7 +11,8 @@ function skybasePrivacyBegin(ws) {
     request.desktopviewonly = true;
     request.consent = (request.consent || 0) | 73;
     request.consentAutoAccept = request.consentAutoAcceptIfNoUser = request.consentAutoAcceptIfDesktopNoUser = request.consentAutoAcceptIfLocked = request.consentAutoAcceptIfDesktopLocked = false;
-    request.oldStyle = true; // Classic native dialog has no five-minute auto-allow option.
+    request.oldStyle = false; // Use MeshCentral's standard enhanced Windows consent dialog.
+    // Begin resets the consent bit after native cached-approval processing; control asks independently.
     request.consentTimeout = 60;
     request.autolock = false;
     if (request.xoptions) request.xoptions.autolock = false;
@@ -33,7 +34,17 @@ function skybasePrivacyRequestControl(ws) {
     skybasePrivacyMetadata(ws, 'waiting-control');
     var promise;
     try {
-        promise = require('message-box').create('SkyBase IT Solutions - Desktop control', ws.httprequest.realname + ' requests permission to CONTROL your mouse and keyboard. Allow desktop control for this session?', 60, null, ws.tsid);
+        var title = 'SkyBase IT Solutions - Desktop control';
+        var message = ws.httprequest.realname + ' requests permission to CONTROL your mouse and keyboard. Allow desktop control for this session?';
+        var nativeDialog = null;
+        if (typeof process != 'undefined' && process.platform === 'win32') {
+            try { nativeDialog = require('win-userconsent'); } catch (missingModule) { }
+        }
+        if (nativeDialog) {
+            promise = nativeDialog.create(title, message, ws.httprequest.realname, { uid: ws.tsid, timeout: 60000, timeoutAutoAccept: false, translations: { Allow: 'Allow', Deny: 'Deny', Auto: 'Approval applies to this session only', Caption: message } });
+        } else {
+            promise = require('message-box').create(title, message, 60, null, ws.tsid);
+        }
         guard.prompt = promise;
         promise.then(function () {
             if (guard.closed || !guard.pending || !ws.httprequest || !ws.httprequest.desktop || !ws.httprequest.desktop.kvm) return;
@@ -68,4 +79,11 @@ function skybasePrivacyControlData(obj, ws) {
     if (['offer', 'webrtc0', 'webrtc1', 'webrtc2'].indexOf(obj.type) >= 0) return true;
     if (!ws.skybasePrivacy.control && ['rtt', 'ping', 'pong', 'close'].indexOf(obj.type) < 0) return true;
     return false;
+}
+
+function skybasePrivacyViewRejected(ws, reason) {
+    if (!ws || !ws.skybasePrivacy) return;
+    var text = String(reason);
+    ws.skybasePrivacy.error = /denied|^7$/i.test(text) ? 'The client declined screen viewing.' : /timeout/i.test(text) ? 'Screen viewing request timed out.' : /session|permission|child exited|dispatch/i.test(text) ? 'Windows could not display the approval dialog. Confirm a signed-in, unlocked client session.' : 'Windows did not grant screen viewing. Check the client screen and agent.';
+    skybasePrivacyMetadata(ws, 'view-denied');
 }
