@@ -1,0 +1,228 @@
+﻿Test ID,Stage,Scenario,Priority,Before you start,Steps to perform,Expected result,Status,Actual result / notes,Evidence link / filename,Tester,Test date (Chicago),Issue ID
+T001,01 Setup,Back up the RMM before testing,Critical,Server administrator; current deployment working,"1. Run scripts/backup-database.py using the documented deployment procedure.
+2. Record the backup location and date.
+3. Confirm a non-empty backup exists.",Database backup exists. Keep it outside the active application data folder as well.,Not started,,,,,
+T002,01 Setup,Prepare the test environment,High,One spare Windows PC; administrator login,"1. Use a spare PC or disposable VM.
+2. Create a QA Test customer/company and group.
+3. Record browser, RMM version/commit and PC name in Start Here.
+4. Use test mail and files.","Tests use a separate QA scope; no production customer records, backups or devices are deleted.",Not started,,,,,
+T003,01 Setup,Administrator sign-in and sign-out,Critical,Existing administrator credentials,"1. Sign in.
+2. Confirm Dashboard loads.
+3. Sign out.
+4. Try opening the previous page.
+5. Sign back in.",Valid credentials work. Signed-out API requests require sign-in. Do not record passwords.,Not started,,,,,
+T004,01 Setup,Refresh and navigation persistence,High,Signed in,"1. Open Backups and refresh.
+2. Repeat on Tickets and User Management.
+3. Use browser Back and Forward.",Refresh retains an allowed page. Back/Forward changes pages correctly.,Not started,,,,,
+T005,01 Setup,Layout and small-screen usability,Normal,Desktop browser and phone or narrow browser,"1. Open Dashboard, Computers, Tickets and User Management.
+2. Test at phone width.
+3. Open an Add/Edit dialog.
+4. Confirm fields and buttons remain reachable.",Cards and dialogs are usable. Tables may scroll inside their container; page controls remain accessible.,Not started,,,,,
+T006,02 Customers & devices,Create customer and company,Critical,Administrator; QA scope,"1. Add customer QA Test with a test contact.
+2. Add QA Test Company linked to that customer.
+3. Refresh.",Correct customer/company link and contact details persist.,Not started,,,,,
+T007,02 Customers & devices,Edit contact information,Normal,QA customer/company,"1. Edit test contact, email and phone.
+2. Save and refresh.",Updated values persist without creating duplicate records.,Not started,,,,,
+T008,02 Customers & devices,Create location and device group,High,QA company,"1. Add QA Lab location.
+2. Add QA Windows group within it.
+3. Rename the test group.
+4. Refresh.",Location/group belong to the correct company; rename persists.,Not started,,,,,
+T009,02 Customers & devices,Enroll a Windows computer,Critical,Spare Windows PC; QA group; trusted installer source,"1. Add Device and select QA company/location/group.
+2. Generate enrollment link.
+3. Install agent on the spare PC.
+4. Wait for synchronization.",Computer appears under the selected company/location/group. Agent connects; existing customer devices are unaffected.,Not started,,,,,
+T010,02 Customers & devices,Online and offline device state,High,QA PC enrolled,"1. Confirm Online.
+2. Shut down/disconnect only the QA PC.
+3. Wait at least one 30-second inventory refresh.
+4. Reconnect it.",State changes Offline then Online after fresh synchronization. Device record remains visible.,Not started,,,,,
+T011,02 Customers & devices,Live telemetry readings,High,QA Windows PC online,"1. Open Computers.
+2. Wait for CPU, memory and system-disk readings.
+3. Compare disk/memory with Windows tools at approximately the same time.",Measured values and reading time appear. Transient CPU variation is normal. Unknown readings are not shown as healthy zeroes.,Not started,,,,,
+T012,02 Customers & devices,Edit computer display name,Normal,QA PC,"1. Rename its RMM display name.
+2. Refresh the page.",Name persists and the computer remains linked to its company/group.,Not started,,,,,
+T013,02 Customers & devices,Search and company filters,Normal,QA and existing inventory,"1. Search for QA PC.
+2. Select QA company.
+3. Clear filters.",Matching records appear; filters clear without losing records.,Not started,,,,,
+T014,02 Customers & devices,Deletion protections,High,QA company/group contains the QA PC,"1. Attempt to delete the non-empty QA company/group.
+2. Cancel where appropriate.
+3. Create and delete a separate empty temporary group/customer.",Non-empty records are protected. Eligible empty temporary records can be removed. MeshCentral groups are not silently deleted.,Not started,,,,,
+T015,03 User access,Create a restricted employee,Critical,Administrator; disposable employee login,"1. Add QA Backup Tech with a unique initial password.
+2. Choose Technician.
+3. Allow Backups: Manage and Antivirus: View only; leave other features No access.
+4. Save.",User card shows exactly those permissions. Password is not displayed back. Keep admin signed in separately.,Not started,,,,,
+T016,03 User access,Required first password change,Critical,QA Backup Tech initial credentials,"1. Open a private browser.
+2. Sign in as QA Backup Tech.
+3. Confirm password-change prompt.
+4. Set a new password of at least 16 characters.",Workspace is unavailable until personal password is set. New password works; initial password no longer works.,Not started,,,,,
+T017,03 User access,Restricted navigation and direct page,Critical,QA Backup Tech signed in,"1. Confirm only Backups and Security navigation is available.
+2. Enter /#users, /#providers and /#devices in the address bar.",Restricted pages are not shown. Navigation falls back to an allowed page. Menus alone are not the full security test; complete T018 too.,Not started,,,,,
+T018,03 User access,Server-side access denial,Critical,QA Backup Tech; browser Developer Tools Network,"1. In the signed-in private browser address bar open /api/users, /api/provider-registry and /api/patches.
+2. Observe HTTP responses.
+3. Return to the RMM.",Each forbidden endpoint returns HTTP 403 without records or vendor settings. Do not paste cookies or tokens into evidence.,Not started,,,,,
+T019,03 User access,Read-only antivirus access,Critical,QA Backup Tech; Antivirus View only,"1. Open Security.
+2. Confirm status/preferences can be read.
+3. Look for Edit provider, Remove choice and Configure console.",RMM change buttons are hidden; restricted mutation requests are denied. External vendor consoles use their own permissions.,Not started,,,,,
+T020,03 User access,Computer enrollment/manage permissions,Critical,Admin can edit QA Backup Tech; separate admin session,"1. Grant Computers: Manage to the QA employee.
+2. Sign in again.
+3. Generate a QA enrollment link and edit QA computer name.
+4. Leave Remote access disabled.",Computer operations work only after grant; remote Connect remains unavailable without its separate permission.,Not started,,,,,
+T021,03 User access,Remote permission is separate,Critical,QA employee has Computers access; QA PC online,"1. As admin grant Remote access: Manage.
+2. Employee signs in again.
+3. Open Connect.
+4. Revoke Remote access and sign in again.",RMM provides Connect only with remote permission. MeshCentral independently checks its own login/rights; RMM does not create MeshCentral accounts.,Not started,,,,,
+T022,03 User access,Administrator settings access,Critical,Existing admin and QA employee,"1. As admin open Providers, AI Agents, email setup and User Management.
+2. Confirm QA employee cannot open those settings.",Settings are administrator-only even when employee has Backup/Antivirus Manage permission.,Not started,,,,,
+T023,03 User access,Permission change revokes session,Critical,QA employee signed in; admin in different browser,"1. As admin remove an employee permission and save.
+2. In the old employee tab trigger a server-backed action or refresh.
+3. Sign in again.",Old session is rejected; new session reflects revised permissions. Previously accepted in-progress jobs may finish.,Not started,,,,,
+T024,03 User access,Deactivate employee,Critical,Disposable QA employee; retain administrator session,"1. As admin uncheck Account active and save.
+2. Employee refreshes or triggers an action.
+3. Attempt employee sign-in.
+4. Reactivate for later testing.",Existing session is rejected on next request. Inactive user cannot sign in.,Not started,,,,,
+T025,03 User access,Administrator password reset,High,Disposable QA employee,"1. Reset employee password in Edit User.
+2. Confirm old employee session/password no longer work.
+3. Sign in with new initial password.",Reset requires another personal password change before workspace access.,Not started,,,,,
+T026,03 User access,Protect administrator access,Critical,Main admin; never disable your only working account,"1. Open your own admin Edit form.
+2. Attempt to deactivate yourself or change your role to Technician.
+3. Confirm rejection and leave account unchanged.",Self-deactivation/self-demotion is rejected. At least one active administrator must remain.,Not started,,,,,
+T027,04 Remote & scripts,Remote desktop session,Critical,QA PC online; authorized MeshCentral login; Remote access permission,"1. Click Connect on QA PC.
+2. Authenticate with MeshCentral as needed.
+3. Open desktop and perform a harmless action.
+4. Disconnect.",Correct PC opens. Remote input/display works. Other computers are not connected accidentally.,Not started,,,,,
+T028,04 Remote & scripts,Script Marketplace browse/copy/download,Normal,Scripts feature access,"1. Search Disk Space Report.
+2. View Code.
+3. Copy it.
+4. Download the script.","The same script content is visible, copied and downloaded. Marketplace does not remotely execute it.",Not started,,,,,
+T029,04 Remote & scripts,Read-only script execution,High,QA PC; downloaded Disk Space Report; reviewed source,"1. Inspect script before running.
+2. Follow existing instructions for trusted PowerShell files.
+3. Run Disk Space Report locally.
+4. Record output.",Report lists real drive data without deleting files or changing the PC. Respect company execution-policy requirements.,Not started,,,,,
+T030,05 Backup & antivirus,Provider setup and persistence,High,Administrator; known provider console addresses,"1. Review/add Acronis, Comet and MSP360 backup choices and required antivirus choices.
+2. Edit a test provider note.
+3. Refresh.",Provider metadata persists. Adding a provider alone does not connect its API or install an agent.,Not started,,,,,
+T031,05 Backup & antivirus,Provider secrets remain masked,Critical,Admin; supported Acronis API setup if available,"1. Save supported credentials through Provider Setup.
+2. Reopen Edit and leave secret blank.
+3. Save an unrelated note.
+4. Inspect browser response for returned fields.",Saved secret is never returned; leaving it blank preserves it. Do not include actual secrets in screenshots or Issues.,Not started,,,,,
+T032,05 Backup & antivirus,Company provider preferences,High,QA company; Backup/Security Manage permission,"1. Assign backup provider to QA company.
+2. Assign antivirus provider.
+3. Refresh and filter by provider.",Company choices persist. No installation or protection is claimed solely because a preference was saved.,Not started,,,,,
+T033,05 Backup & antivirus,Acronis API connection and matching,High,Acronis test tenant; API client access; existing QA protected device,"1. Test Acronis connection.
+2. Load inventory.
+3. Link QA PC to the matching Acronis resource.
+4. Compare company/device identities carefully.",Authentication succeeds; matching device is linked uniquely. Missing/ambiguous backup evidence stays unverified.,Not started,,,,,
+T034,05 Backup & antivirus,Acronis backup completion,Critical,QA PC and backup plan in Acronis console,"1. Run a backup in Acronis for QA PC.
+2. Wait for completion.
+3. Refresh RMM backup history.
+4. Check task identity and result.","Vendor confirms completed backup. RMM reports only supported, uniquely matched task evidence. No completed task is treated as proof of retained recovery points.",Not started,,,,,
+T035,05 Backup & antivirus,Recover a test file,Critical,Completed QA backup; harmless test file; alternate restore folder,"1. Select a backed-up QA test file in vendor console.
+2. Restore it to a NEW folder.
+3. Open file and compare content.",File restores correctly to alternate location. Do not overwrite production files or restore an entire production disk.,Not started,,,,,
+T036,05 Backup & antivirus,Comet/MSP360 console workflow,High,"Chosen vendor test account, agent/license/storage as required","1. Assign chosen provider in RMM.
+2. Open its console with vendor-authorized credentials.
+3. Run backup and test-file restore there.
+4. Record vendor result separately.",Vendor backup/restore works if configured. RMM console-only integration remains explicitly unverified; do not mark native RMM API automation as passed.,Not started,,,,,
+T037,05 Backup & antivirus,Antivirus protection and agent compatibility,Critical,QA PC; chosen licensed antivirus provider,"1. Check protection/update status in vendor console.
+2. Confirm antivirus and MeshCentral agent remain running.
+3. Restart QA PC and reconnect.
+4. Review vendor alerts/quarantine if connection fails.",Vendor verifies protection; MeshCentral still connects. RMM preference alone does not prove protection. Investigate detections rather than disabling all protection.,Not started,,,,,
+T038,06 Patch planning,Create and edit a real patch record,High,QA PC; Windows Update pending list or vendor applicability guidance,"1. Choose a REAL pending/applicable update on QA PC.
+2. Add exact KB/reference, description, vendor, type/severity.
+3. Set Requires Reboot based on vendor guidance.
+4. Edit and refresh.",Catalog fields persist. Previously installed KBs are not used as evidence of a needed patch. Catalog does not discover/install updates automatically.,Not started,,,,,
+T039,06 Patch planning,"Patch search, categories and reboot label",Normal,QA patch record,"1. Search exact patch name/ID.
+2. Filter its type.
+3. Toggle Requires Reboot in Edit and save.",Correct patch is found and declared reboot setting is displayed accurately.,Not started,,,,,
+T040,06 Patch planning,Company-wide planned-update notification,High,QA company; online QA Windows PCs with signed-in test users,"1. Deploy/plan notice for QA company only.
+2. Enter a real maintenance date/time including time zone.
+3. Check each signed-in QA user session for the popup.
+4. Record per-PC delivery and screenshots.",Signed-in test sessions receive planned-update notice with declared reboot requirement. Windows accepted is not proof user read it. No patch install/restart is implied.,Not started,,,,,
+T041,06 Patch planning,Offline notification outcome,High,QA company; one disconnected QA PC,"1. Keep one QA PC offline.
+2. Submit a QA notice.
+3. Inspect per-PC results.",Offline/busy/failed/uncertain targets are shown honestly rather than claiming delivery to all PCs. Verify actual screens for online targets.,Not started,,,,,
+T042,06 Patch planning,Verify actual update separately,High,QA maintenance window; approved applicable update,"1. Install applicable update using Windows Update or authorized vendor workflow.
+2. Restart only if required and agreed.
+3. Check Windows Update history/build afterward.
+4. Record actual result.",Windows/vendor confirms installation. RMM planned count is not treated as verified installed state. Native installation remains Future Features.,Not started,,,,,
+T043,07 Network & AD,Scan the correct local subnet,High,QA/owned subnet; online Windows scan agent; consent to scan,"1. Run ipconfig on QA scan agent.
+2. Identify active adapter address/mask.
+3. Enter its actual private subnet, e.g. 192.168.0.0/24 only if matching.
+4. Select QA company/agent and scan.
+5. Wait for completion.",Real observed devices appear; source agent/subnet are correct. Do not scan arbitrary customer/public networks.,Not started,,,,,
+T044,07 Network & AD,"Network results, filtering and labels",Normal,Completed QA scan,"1. Compare two discovered IPs with known QA devices/router.
+2. Filter device types.
+3. Edit a QA device label/type.
+4. Refresh.",Observed IP/port data matches evidence; manual labels persist. Discovery map does not invent physical network topology.,Not started,,,,,
+T045,07 Network & AD,Network scan error handling,High,QA scan setup,"1. Try a subnet that is NOT connected to the selected QA agent, or an invalid CIDR.
+2. Submit scan.",Validation/error explains the problem. It does not invent successful results. Do not repeatedly start scans on a busy agent.,Not started,,,,,
+T046,07 Network & AD,Active Directory read-only sync,High,QA domain; DC/domain-joined agent; RSAT; authorized service account,"1. Select QA company and AD-capable agent.
+2. Sync from AD.
+3. Compare known test user/group/OU with AD tools.","Real directory records appear in correct scope. No AD accounts, passwords or memberships are changed. If prerequisites missing, mark Blocked or justified Not applicable.",Not started,,,,,
+T047,08 Tickets & AI,Create a manual ticket,Critical,QA customer/company and PC,"1. Create QA ticket with title, description, customer, PC, priority/category.
+2. Open its details.
+3. Refresh.","Unique ticket number, correct relationships and data persist.",Not started,,,,,
+T048,08 Tickets & AI,Ticket lifecycle and notes,High,QA manual ticket; Tickets Manage,"1. Add internal note.
+2. Edit priority/category.
+3. Mark In Progress, then Resolved.
+4. Reopen it.",Status and notes persist; note identifies actual signed-in technician. Internal notes are not emailed.,Not started,,,,,
+T049,08 Tickets & AI,Configure a dedicated test support mailbox,High,Admin; IMAP mailbox/server; verified TLS; provider instructions,"1. Configure test address, host, user, folder and password.
+2. Save and run Check Mail.
+3. Reopen setup.",Connection succeeds with verified TLS. Password remains masked. Initial connection establishes new-mail checkpoint rather than importing historical inbox.,Not started,,,,,
+T050,08 Tickets & AI,Incoming email creates ticket,Critical,Configured test mailbox; Check Mail checkpoint completed,"1. Send a NEW message from a separate test sender after setup.
+2. Wait for poll or Check Mail.
+3. Open created ticket.",One ticket is created with correct subject/body/requester and email source. Attachments remain in mailbox; no outbound acknowledgment is expected.,Not started,,,,,
+T051,08 Tickets & AI,Email threading and deduplication,Critical,QA email-created ticket,"1. Reply in original email thread from same test sender.
+2. Check mail twice.
+3. Resolve ticket, then send another reply.",Reply appends once to the same ticket; repeat checks do not duplicate it. New reply reopens resolved ticket when properly threaded.,Not started,,,,,
+T052,08 Tickets & AI,Unknown sender handling,High,Configured test mailbox; new unmatched test address,"1. Send new mail from an address not stored in contacts.
+2. Open ticket and inspect customer assignment.",Ticket remains unmatched/unassigned rather than guessed. Saved email match is not proof of sender identity.,Not started,,,,,
+T053,08 Tickets & AI,Configure and test AI agent,High,Admin; supported provider API account/key; small API usage budget,"1. Add chosen AI provider, model and key.
+2. Test Connection.
+3. Select default agent.
+4. Reopen Edit.",Supported model authenticates and returns structured output. Key is masked. API billing is separate from ChatGPT subscription; do not record keys.,Not started,,,,,
+T054,08 Tickets & AI,Manual AI ticket analysis,High,QA ticket; configured default AI; Tickets Manage,"1. Review ticket text for sensitive data.
+2. Run AI Review on a harmless QA problem.
+3. Read summary, causes, steps/questions.","Structured suggestions appear with agent/model information. No commands run, no ticket is auto-resolved, and suggestions require technician review.",Not started,,,,,
+T055,08 Tickets & AI,Automatic email AI and invalidation,High,Default AI has automatic email review enabled,"1. Send new harmless QA ticket email.
+2. Wait for review job.
+3. Edit ticket or add note after review.
+4. Review again.",Automatic review appears or a clear job error is shown. Changed ticket content invalidates old analysis; fresh review reflects latest information.,Not started,,,,,
+T056,09 Monitoring,Enable and save an offline rule,Critical,QA PC; Monitoring Manage; QA company; existing rules initially disabled,"1. Edit Computer offline rule.
+2. Scope to QA company.
+3. Set duration 1 minute; enable; optionally enable auto-ticket.
+4. Save and refresh.","Save works, settings persist, and unrelated companies are not included. Non-percentage rules are not blocked by hidden fields.",Not started,,,,,
+T057,09 Monitoring,Offline alert and automatic ticket,Critical,Enabled QA offline rule; QA PC initially online,"1. Disconnect only QA PC.
+2. Wait for fresh inventory and sustained duration (allow several minutes).
+3. Check Monitoring alerts and Tickets.
+4. Run another check.","One active alert and, if opted in, one automatic ticket appear. Repeat checks do not create duplicates for same incident.",Not started,,,,,
+T058,09 Monitoring,Recovery does not close technician ticket,Critical,Active QA offline alert with ticket,"1. Reconnect QA PC.
+2. Wait for fresh inventory/check.
+3. Inspect alert and ticket.",Alert becomes Recovered from fresh evidence. Recovery note is added; ticket stays open until technician resolves it.,Not started,,,,,
+T059,09 Monitoring,Metric rule and pending evidence,High,QA Windows PC; choose safe measurable condition; no stress test on production,"1. Create QA CPU/memory/disk rule with suitable threshold/recovery and 1-minute duration.
+2. Check fresh readings and pending evidence.
+3. Observe alert only if condition stays breached.",Rule uses measured fresh evidence and hysteresis. No alert appears merely from a single spike or repeatedly cached timestamp.,Not started,,,,,
+T060,09 Monitoring,Service monitoring is read-only,High,QA Windows PC; Spooler present; do not stop production services,"1. Add a QA service rule for Spooler.
+2. Check known running state.
+3. If safe in isolated QA VM, stop it locally, observe sustained alert, then restart locally.",RMM reads service state; it does not change the service. Alert/recovery follow fresh evidence and duration.,Not started,,,,,
+T061,09 Monitoring,Unknown/busy data does not imply failure,Critical,QA metric/service rule; QA agent temporarily unavailable,"1. Temporarily disconnect QA agent or observe a reported busy/unknown read.
+2. Inspect Pending / Unavailable Readings.
+3. Restore connection.",Unknown/stale readings do not create metric/service failure tickets or falsely recover an existing alert. Offline rule is evaluated separately.,Not started,,,,,
+T062,09 Monitoring,Acknowledge alert,Normal,Active QA alert,"1. Acknowledge alert.
+2. Refresh and check linked ticket.","Alert becomes Acknowledged, not Recovered. Ticket is not silently resolved.",Not started,,,,,
+T063,09 Monitoring,Backup-failure rule evidence,High,Supported Acronis integration; uniquely linked QA resource/task; controlled test failure if available,"1. Add QA Acronis unsuccessful-backup rule.
+2. Compare evaluated task/resource with vendor console.
+3. If no confirmed failure exists, record coverage as unknown/no failure rather than forcing a production failure.",Only uniquely linked confirmed failed task evidence can trigger a backup alert. Missing/ambiguous tasks are unverified. Full failure-trigger test may be Blocked.,Not started,,,,,
+T064,10 Reliability & cleanup,Restart and persistence,Critical,Admin; QA records created; safe maintenance window,"1. Record QA account permissions, device/group, ticket, provider choice and rule.
+2. Restart only maldoori using documented PM2 command.
+3. Sign in again and compare.",Records/settings remain. In-memory sessions require sign-in again. New account password changes survive restart; environment bootstrap does not reset them.,Not started,,,,,
+T065,10 Reliability & cleanup,Database recovery rehearsal,Critical,Database backup; separate disposable RMM instance; do not overwrite live DB,"1. Restore backup into a SEPARATE test instance using documented procedure.
+2. Start it with appropriate test integrations disabled or isolated.
+3. Verify representative records and admin sign-in.",Recovery restores usable data/accounts. Production stays unchanged; no duplicate scheduled actions or email intake are allowed from rehearsal instance.,Not started,,,,,
+T066,10 Reliability & cleanup,Resource usage during normal work,High,Droplet metrics; several QA PCs; typical technician actions,"1. Observe CPU/RAM/disk/network while refreshing inventory and using one scan/remote session.
+2. Record device count, concurrent sessions, response times and errors.
+3. Check for sustained memory/CPU pressure.",Measured baseline is documented. Small QA success does not prove 100-device capacity; larger load test remains separate.,Not started,,,,,
+T067,10 Reliability & cleanup,Clean up QA settings and review release,Critical,Admin; complete or recorded outcomes,"1. Disable temporary monitoring rules.
+2. Deactivate test employees.
+3. Cancel vendor test schedules if appropriate.
+4. Keep useful test evidence/history.
+5. Review all Critical failures and Blocked scenarios.",No unintended QA jobs remain. Required critical tests pass; unresolved risks are documented before customer rollout. Do not delete production backups or records.,Not started,,,,,
