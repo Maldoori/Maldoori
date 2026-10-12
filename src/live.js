@@ -1,9 +1,25 @@
 import {scriptLibrary} from './script-library.js';
 const $ = s => document.querySelector(s);
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const pages=new Set(['overview','devices','companies','groups','backups','security','patches','network','directory','scripts','tickets','ai','providers','monitoring']);
+const pages=new Set(['overview','devices','companies','groups','backups','security','patches','network','directory','scripts','tickets','ai','providers','monitoring','users']);
 const pageFromUrl=()=>pages.has(location.hash.slice(1))?location.hash.slice(1):'overview';
 let inventory = {groups:[],customers:[],companies:[],locations:[],deviceGroups:[],devices:[]}, refreshing = false, page = pageFromUrl();
+
+let account=null,userData={users:[],features:{}};
+const can=(feature,manage=false)=>!!account?.active&&(account.role==='admin'||account.permissions[feature]==='manage'||(!manage&&account.permissions[feature]==='view'));
+const canPage=value=>['users','providers','ai'].includes(value)?account?.role==='admin':can(value);
+function applyAccess(){
+ if(!account)return;
+ for(const button of document.querySelectorAll('[data-page]'))button.hidden=!canPage(button.dataset.page);
+ const controls={devices:'#add-device,#quick-device,[data-edit-device],[data-delete-device],[data-invite],[data-group-invite]',companies:'#add-customer,#cards-add-customer,#cards-add-company,#add-company,#add-location,#quick-company,[data-edit-company],[data-company-location],[data-edit-customer],[data-delete-customer],[data-delete-company],[data-delete-organisation]',groups:'#add-group,[data-link-group],[data-edit-device-group],[data-remove-device-group]',backups:'#choose-backup-provider,#schedule-backup,[data-acronis-link],[data-backup-unlink],[data-provider-schedule],[data-schedule-company]',security:'#assign-security-provider,[data-security-company],[data-security-remove]',patches:'#add-patch,[data-patch-edit],[data-patch-delete],[data-patch-deploy],[data-patch-notify]',network:'#start-network-scan,[data-network-label]',directory:'#directory-sync',tickets:'#ticket-note-form,#ticket-detail-edit,#ticket-detail-status,#ticket-ai-review,#ticket-create,[data-ticket-edit],[data-ticket-delete],[data-ticket-resolve],[data-ticket-review]',monitoring:'#monitor-add,#monitor-check,[data-monitor-rule-edit],[data-monitor-rule-delete],[data-monitor-ack]',remote:'[data-remote],[data-dashboard-connect],#quick-remote,#device-remote'};
+ for(const [feature,selectors]of Object.entries(controls))for(const button of document.querySelectorAll(selectors))button.hidden=!can(feature,true);
+ for(const button of document.querySelectorAll('#backup-provider-setup,#tickets-email,#ticket-email-setup,#ticket-from-email,#security-provider-setup,[data-provider-console-save],[data-registry-edit],[data-security-settings],[data-console-provider]'))button.hidden=account.role!=='admin';
+ $('#global-search').hidden=!can('devices');$('#sync').hidden=!can('devices');
+ $('#account-password').hidden=false;$('#account-password').textContent=account.name+' · My account';
+}
+function passwordForm(required=false){showDialog(`<h2>${required?'Set your personal password':'Change password'}</h2><p class="muted">${required?'Replace your initial password before using the workspace.':'Your other sessions will be signed out.'}</p><form id="password-form"><label>Current password<input name="currentPassword" type="password" required autocomplete="current-password" maxlength="256"></label><label>New password<input name="password" type="password" required minlength="16" maxlength="256" autocomplete="new-password"></label><label>Confirm new password<input name="confirmPassword" type="password" required minlength="16" maxlength="256" autocomplete="new-password"></label>${actions('Change Password')}</form>`);$('#password-form').onsubmit=async e=>{e.preventDefault();const input=Object.fromEntries(new FormData(e.target));if(input.password!==input.confirmPassword){$('#form-error').textContent='Passwords do not match.';return;}const button=e.target.querySelector('.primary');button.disabled=true;try{const result=await api('password-change',input);account=result.user;$('#modal').close();await refresh();}catch(error){$('#form-error').textContent=error.message;}finally{button.disabled=false;}};}
+async function loadUsers(){try{userData=await api('users');$('#users-summary').innerHTML=[[userData.users.length,'Total Users'],[userData.users.filter(u=>u.role==='admin').length,'Administrators'],[userData.users.filter(u=>u.role==='technician').length,'Technicians']].map(([n,label])=>`<article><strong>${n}</strong><span>${label}</span></article>`).join('');$('#users-list').innerHTML=userData.users.map(u=>`<article class="ticket-card user-card"><span class="user-avatar">${escape(u.name[0].toUpperCase())}</span><div class="ticket-content"><strong>${escape(u.name)}</strong><p>${escape(u.username)}${u.email?' · '+escape(u.email):''}</p><div class="user-permissions">${u.role==='admin'?'<span class="ticket-badge status-resolved">Full Access</span>':Object.entries(u.permissions).map(([k,v])=>`<span class="ticket-badge">${escape(userData.features[k])} · ${v==='manage'?'Manage':'View'}</span>`).join('')||'<span class="muted">No features assigned</span>'}</div>${u.mustChangePassword?'<small>Personal password change required</small>':''}</div><span class="ticket-badge">${u.role==='admin'?'Administrator':'Technician'}</span><span class="ticket-badge ${u.active?'status-resolved':''}">${u.active?'Active':'Inactive'}</span><button data-user-edit="${u.id}">♢ Edit</button></article>`).join('');bind('[data-user-edit]',b=>userForm(b.dataset.userEdit));}catch(error){$('#users-message').textContent=error.message;}}
+function userForm(id=''){const u=userData.users.find(u=>u.id===id)||{role:'technician',active:true,permissions:{}};showDialog(`<div class="patch-modal-heading"><h2>${id?'Edit':'Add'} User</h2><button data-close aria-label="Close">×</button></div><form id="user-form"><div class="ticket-form-grid"><label>Full name<input name="name" required maxlength="120" value="${escape(u.name)}"></label><label>Username<input name="username" required minlength="3" maxlength="120" value="${escape(u.username)}" autocomplete="off"></label><label>Email (optional)<input name="email" type="email" maxlength="254" value="${escape(u.email)}"></label><label>Role<select name="role"><option value="technician" ${u.role==='technician'?'selected':''}>Technician — custom permissions</option><option value="admin" ${u.role==='admin'?'selected':''}>Administrator — full access</option></select></label></div><label>${id?'Reset password (leave blank to keep)':'Initial password'}<input name="password" type="password" ${id?'':'required'} minlength="16" maxlength="256" autocomplete="new-password"></label><p class="muted">Share initial passwords privately. The employee must change it at sign-in. Email invitations are not sent.</p><label class="ticket-setting-check"><input name="active" type="checkbox" ${u.active?'checked':''}> Account active</label><div id="user-feature-permissions"><h3>Feature permissions</h3><p class="muted">View allows reading. Manage also allows changes and actions. Vendor, AI, email and user settings require Administrator.</p><div class="ticket-form-grid">${Object.entries(userData.features).map(([key,label])=>`<label>${escape(label)}<select data-user-permission="${key}"><option value="">No access</option><option value="view" ${u.permissions[key]==='view'?'selected':''}>View only</option><option value="manage" ${u.permissions[key]==='manage'?'selected':''}>${key==='remote'?'Allow remote access':'View & manage'}</option></select></label>`).join('')}</div></div>${actions(id?'Save User':'Create User')}</form>`);const form=$('#user-form'),update=()=>$('#user-feature-permissions').hidden=form.elements.role.value==='admin';form.elements.role.onchange=update;update();form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('.primary');button.disabled=true;const input=Object.fromEntries(new FormData(form));input.id=id;input.active=form.elements.active.checked;input.permissions=Object.fromEntries([...form.querySelectorAll('[data-user-permission]')].filter(s=>s.value).map(s=>[s.dataset.userPermission,s.value]));try{await api('user-save',input);$('#modal').close();await refresh();await loadUsers();}catch(error){$('#form-error').textContent=error.message;}finally{button.disabled=false;}};}
 const dashboardWidgets=[{id:'dashboard-stats',name:'Inventory totals'},{id:'dashboard-endpoints',name:'Endpoint status'},{id:'dashboard-coverage',name:'Protection overview'},{id:'dashboard-alerts',name:'Priority alerts'},{id:'dashboard-inventory',name:'Inventory table'},{id:'dashboard-quick',name:'Quick tools'},{id:'companies-panel',name:'Customers & companies'},{id:'devices-panel',name:'Computer cards and live metrics'},{id:'backups-panel',name:'Backup providers'}];
 const defaultDashboard=()=>({columns:3,order:dashboardWidgets.map(w=>w.id),hidden:['companies-panel','devices-panel','backups-panel']});
 function normalizeDashboard(value){if(!value||typeof value!=='object')return defaultDashboard();const ids=dashboardWidgets.map(w=>w.id);return {columns:[1,2,3].includes(value?.columns)?value.columns:1,order:[...new Set([...(Array.isArray(value?.order)?value.order.filter(id=>ids.includes(id)):[]),...ids])],hidden:Array.isArray(value?.hidden)?[...new Set(value.hidden.filter(id=>ids.includes(id)))]:[]};}
@@ -13,10 +29,10 @@ function applyDashboard(){
   target.className='dashboard-layout dashboard-columns-'+dashboard.columns;
   for(const id of dashboard.order){
     const widget=$('#'+id);
-    if(isDashboard){target.append(widget);widget.hidden=dashboard.hidden.includes(id);}
+    if(isDashboard){target.append(widget);widget.hidden=dashboard.hidden.includes(id)||(id==='companies-panel'&&!can('companies'))||(id==='devices-panel'&&!can('devices'))||(id==='backups-panel'&&!can('backups'));}
     else{$('#workspace').insertBefore(widget,$('#groups-panel'));widget.hidden=id.startsWith('dashboard-')&&id!=='dashboard-stats'||id==='companies-panel'&&page!=='companies'||id==='devices-panel'&&page!=='devices'||id==='backups-panel'&&page!=='backups';}
   }
-  if(isDashboard&&!dashboard.hidden.includes('backups-panel')){loadAcronis();loadBackupProviders();}
+  if(isDashboard&&can('backups')&&!dashboard.hidden.includes('backups-panel')){loadAcronis();loadBackupProviders();}
   if(isDashboard&&dashboard.hidden.length===dashboardWidgets.length){target.append($('#dashboard-empty'));$('#dashboard-empty').hidden=false;}else $('#dashboard-empty').hidden=true;
 }
 function customizeDashboard(){
@@ -34,7 +50,7 @@ function customizeDashboard(){
 async function api(path, data) {
   const response = await fetch('/api/' + path, {method:data === undefined ? 'GET' : 'POST',headers:data === undefined ? {} : {'Content-Type':'application/json'},body:data === undefined ? undefined : JSON.stringify(data)});
   const value = await response.json();
-  if (response.status === 401) { $('#modal').close(); $('#workspace').hidden = true; $('#logout').hidden = true; $('#login').hidden = false; }
+  if (response.status === 401) { $('#modal').close(); $('#workspace').hidden = true; $('#logout').hidden = true; $('#login').hidden = false; $('#account-password').hidden=true; }
   if (!response.ok) throw new Error(value.error || 'Request failed.');
   return value;
 }
@@ -46,7 +62,8 @@ function devicesFiltered() {
   return inventory.devices.filter(d => (!company || d.companyId===company) && (!location || d.locationId===location) && (!group || d.groupId===group) && (!status || d.online===(status==='online')) && `${d.name} ${d.company} ${d.location} ${d.groupName} ${d.os}`.toLowerCase().includes(query));
 }
 function changePage(value,updateUrl=false) {
-  page=pages.has(value)?value:'overview';
+  page=pages.has(value)&&canPage(value)?value:[...pages].find(canPage)||'none';
+  $('#no-access-panel').hidden=page!=='none';$('#users-panel').hidden=page!=='users';if(page==='users')loadUsers();
   if(updateUrl&&location.hash!=='#'+page){const url=new URL(location.href);url.hash=page;history.pushState(null,'',url);}
   document.querySelectorAll('[data-page]').forEach(b=>{b.classList.toggle('active',b.dataset.page===page);b.setAttribute('aria-current',b.dataset.page===page?'page':'false');});
   $('#companies-panel').hidden=!['overview','companies'].includes(page);
@@ -54,7 +71,7 @@ function changePage(value,updateUrl=false) {
   $('#backups-panel').hidden=page!=='backups';
   if(page==='backups'){loadAcronis();loadBackupProviders();}
   $('#groups-panel').hidden=page!=='groups';
-  $('#monitoring-panel').hidden=page!=='monitoring';if(page==='monitoring'||page==='overview')loadMonitoring();else clearTimeout(monitorTimer);
+  $('#monitoring-panel').hidden=page!=='monitoring';if((page==='monitoring'||page==='overview')&&can('monitoring'))loadMonitoring();else clearTimeout(monitorTimer);
   $('#provider-panel').hidden=page!=='providers';if(page==='providers')loadProviderRegistry();
   $('#ai-panel').hidden=page!=='ai';if(page==='ai')loadAgents();
   $('#tickets-panel').hidden=page!=='tickets';if(page==='tickets')loadTickets();
@@ -63,8 +80,8 @@ function changePage(value,updateUrl=false) {
   $('#network-panel').hidden=page!=='network';if(page==='network'){renderNetworkSites();loadNetwork();}else clearTimeout(networkTimer);
   $('#patches-panel').hidden=page!=='patches';if(page==='patches')loadPatches();
   $('#security-panel').hidden=page!=='security';if(page==='security')loadSecurity();
-  $('#workspace-title').textContent={overview:'Dashboard',devices:'Computers',companies:'Customers & companies',groups:'Device groups',backups:'Backups',security:'Security',patches:'Patch Management',network:'Network Scan',directory:'Active Directory',scripts:'Script Marketplace',tickets:'Tickets',ai:'AI Agents',providers:'Provider Setup',monitoring:'Monitoring & Alerts'}[page];
-  applyDashboard();
+  $('#workspace-title').textContent={overview:'Dashboard',devices:'Computers',companies:'Customers & companies',groups:'Device groups',backups:'Backups',security:'Security',patches:'Patch Management',network:'Network Scan',directory:'Active Directory',scripts:'Script Marketplace',tickets:'Tickets',ai:'AI Agents',providers:'Provider Setup',monitoring:'Monitoring & Alerts',users:'User Management',none:'Workspace access'}[page];
+  applyDashboard();if(page==='users'||page==='none')$('#dashboard-stats').hidden=true;applyAccess();
 }
 function render() {
   setFilter('#global-company',inventory.companies,'All companies');
@@ -118,6 +135,7 @@ function renderDashboardOverview(){
  bind('[data-dashboard-device]',b=>manageDevice(b.dataset.dashboardDevice));bind('[data-dashboard-connect]',b=>openRemote(b.dataset.dashboardConnect));
 }
 async function loadMetrics(){
+  if(!can('devices'))return;
   const queue=devicesFiltered();queue.forEach(paintMetrics);
   async function worker(){for(let d;(d=queue.shift());){
     if(!d.online||!d.windows||inventory.error||metricsPending.has(d.id))continue;
@@ -132,10 +150,10 @@ async function loadMetrics(){
 function bind(selector,handler){document.querySelectorAll(selector).forEach(b=>b.onclick=()=>handler(b));}
 async function refresh() {
   if(refreshing)return;refreshing=true;
-  try{inventory=await api('inventory');$('#login').hidden=true;$('#workspace').hidden=false;$('#logout').hidden=false;render();}
+  try{const nextAccount=(await api('me')).user;if(account&&(account.id!==nextAccount.id||account.version!==nextAccount.version)){metrics.clear();monitorData={rules:[],alerts:[],counts:[],health:{},recentObservations:[]};acronisData={resources:[],tasks:[],links:[],backupResults:[]};}account=nextAccount;if(account.mustChangePassword){$('#workspace').hidden=true;$('#login').hidden=true;$('#logout').hidden=false;$('#account-password').hidden=false;if(!$('#modal').open)passwordForm(true);return;}inventory=await api('inventory');$('#login').hidden=true;$('#workspace').hidden=false;$('#logout').hidden=false;render();}
   catch(error){if(!$('#workspace').hidden)message(error.message);}finally{refreshing=false;}
 }
-function showDialog(html){$('#modal').innerHTML=html;$('#modal').showModal();$('#modal').querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$('#modal').close());}
+function showDialog(html){$('#modal').innerHTML=html;$('#modal').showModal();$('#modal').querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$('#modal').close());applyAccess();}
 function actions(label){return `<p id="form-error" role="alert"></p><div class="actions"><button type="button" data-close>Cancel</button><button class="primary">${label}</button></div>`;}
 function submitForm(id,route,onSuccess=refresh){$(id).onsubmit=async e=>{e.preventDefault();const button=e.target.querySelector('.primary');button.disabled=true;$('#form-error').textContent='';try{await api(route,Object.fromEntries(new FormData(e.target)));$('#modal').close();message('');await onSuccess();}catch(error){if($('#form-error'))$('#form-error').textContent=error.message;}finally{button.disabled=false;}};}
 function setupRequired(){showDialog('<h2>Add device</h2><p class="muted">Set up your company once, or link an existing MeshCentral group. You can then add multiple locations, groups, and computers.</p><div class="actions"><button data-close>Cancel</button><button id="setup-company" class="primary">Set up company</button></div>');$('#setup-company').onclick=()=>{$('#modal').close();companyForm();};}
@@ -190,7 +208,7 @@ function deleteOrganisation(id,kind){const row=inventory[kind==='company'?'compa
 $('#customers-tab').onclick=()=>{organisationTab='customers';renderOrganisations();};$('#companies-tab').onclick=()=>{organisationTab='companies';renderOrganisations();};$('#organisation-search').oninput=renderOrganisations;
 
 function renameCompany(id){const company=inventory.companies.find(c=>c.id===id);showDialog(`<h2>Edit company</h2><form id="rename-company-form"><input type="hidden" name="id" value="${escape(id)}"><label>Customer<select name="customerId">${options(inventory.customers,company.customer_id,'Unassigned customer')}</select></label><label>Company name<input name="name" required maxlength="120" value="${escape(company.name)}"></label>${organisationFields(company)}${actions('Save company')}</form>`);submitForm('#rename-company-form','company-update');}
-function openRemote(id){const d=inventory.devices.find(d=>d.id===id);if(d?.online&&!inventory.error)window.open(d.desktopUrl,'_blank','noopener,noreferrer');}
+function openRemote(id){const d=inventory.devices.find(d=>d.id===id);if(can('remote',true)&&d?.desktopUrl&&d.online&&!inventory.error)window.open(d.desktopUrl,'_blank','noopener,noreferrer');}
 function editDevice(id){const d=inventory.devices.find(d=>d.id===id);showDialog(`<h2>Edit computer</h2><form id="edit-device-form"><input type="hidden" name="id" value="${escape(id)}"><label>Display name<input name="name" required maxlength="120" value="${escape(d.name)}"></label><p class="muted">Agent computer name: ${escape(d.agentName||d.name)}. This changes the name displayed in Maldoori.</p>${actions('Save computer')}</form>`);submitForm('#edit-device-form','device-update');}
 function deleteDevice(id){const d=inventory.devices.find(d=>d.id===id);showDialog(`<h2>Delete computer</h2><p>Remove <strong>${escape(d.name)}</strong> from Maldoori?</p><p class="muted">It stays removed after synchronization. Its MeshCentral agent and Acronis backups remain installed and available in their consoles.</p><p id="form-error" role="alert"></p><div class="actions"><button data-close>Cancel</button><button class="danger" id="confirm-delete-device">Delete computer</button></div>`);$('#confirm-delete-device').onclick=async()=>{const b=$('#confirm-delete-device');b.disabled=true;try{await api('device-delete',{id,confirm:true});$('#modal').close();await refresh();}catch(error){$('#form-error').textContent=error.message;b.disabled=false;}};}
 function manageDevice(id){const d=inventory.devices.find(d=>d.id===id);showDialog(`<h2>${escape(d.name)}</h2><p class="muted">${escape(d.company)} / ${escape(d.location)} / ${escape(d.groupName)}</p><div class="detail-grid"><div>Operating system<strong>${escape(d.os)}</strong></div><div>Connection<strong>${d.online?'Online':'Offline'}</strong></div></div><div class="actions"><button data-close>Close</button><button id="device-remote" class="primary" ${!d.online||inventory.error?'disabled':''}>Remote Desktop ↗</button></div>`);$('#device-remote').onclick=()=>openRemote(id);}
@@ -385,7 +403,7 @@ function linkAcronis(id){
 $('#acronis-connect').onclick=async()=>{const b=$('#acronis-connect');b.disabled=true;$('#acronis-status').textContent='Checking Acronis authentication…';try{renderAcronis(await api('acronis-connect',{}));}catch(error){$('#acronis-console').hidden=true;$('#acronis-status').textContent=error.message;}finally{b.disabled=false;}};
 $('#modal').addEventListener('close',()=>$('#modal').classList.remove('wide'));
 $('#login-form').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{await api('login',Object.fromEntries(new FormData(e.target)));e.target.reset();message('');await refresh();}catch(error){message(error.message);}finally{b.disabled=false;}};
-$('#logout').onclick=async()=>{try{await api('logout',{});$('#modal').close();$('#workspace').hidden=true;$('#logout').hidden=true;$('#login').hidden=false;}catch(error){message(error.message);}};
+$('#logout').onclick=async()=>{try{await api('logout',{});$('#modal').close();$('#workspace').hidden=true;$('#logout').hidden=true;$('#login').hidden=false;$('#account-password').hidden=true;}catch(error){message(error.message);}};
 $('#sync').onclick=async()=>{$('#sync').disabled=true;try{await api('sync',{});message('');}catch(error){message(error.message);}finally{await refresh();$('#sync').disabled=false;}};
 $('#search').oninput=render;['#company-filter','#location-filter','#group-filter','#status-filter'].forEach(id=>$(id).onchange=render);
 $('#add-customer').onclick=()=>customerForm();$('#cards-add-customer').onclick=()=>customerForm();$('#cards-add-company').onclick=()=>companyForm();
@@ -396,4 +414,6 @@ $('#customize-dashboard').onclick=customizeDashboard;$('#quick-device').onclick=
 $('#add-company').onclick=companyForm;$('#add-device').onclick=()=>enroll($('#company-filter').value,$('#location-filter').value,$('#group-filter').value);$('#add-location').onclick=()=>locationForm();$('#add-group').onclick=()=>groupForm();bind('[data-page]',b=>changePage(b.dataset.page,true));
 window.addEventListener('popstate',()=>changePage(pageFromUrl()));
 window.addEventListener('hashchange',()=>changePage(pageFromUrl()));
+$('#user-add').onclick=()=>userForm();$('#account-password').onclick=()=>passwordForm(account?.mustChangePassword);
+new MutationObserver(()=>applyAccess()).observe($('#workspace'),{childList:true,subtree:true});
 await refresh();setInterval(()=>{if(!$('#workspace').hidden)refresh();},30000);

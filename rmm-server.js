@@ -1,3 +1,5 @@
+import {initializeUsers,publicUser,verifyPassword,saveUser,changePassword,allowed,routePermission,features} from './lib/users.js';
+import {AsyncLocalStorage} from 'node:async_hooks';
 import http from 'node:http';
 import {initializeMonitoring,saveMonitorRule,closeMonitorRule,observeMonitor} from './lib/monitoring.js';
 import {initializeProviders,ProviderRegistry,consoleURL} from './lib/providers.js';
@@ -10,7 +12,7 @@ import {patchNotice,notificationCommand,notificationAccepted} from './lib/patch-
 import {initializePatches,savePatch} from './lib/patches.js';
 import { readFile, writeFile, rename, unlink, lstat, mkdir, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {telemetryCommand,parseTelemetry} from './lib/telemetry.js';
 import {AcronisClient} from './lib/acronis.js';
@@ -32,7 +34,7 @@ const publicUrl = new URL(setting('PUBLIC_URL') || 'http://127.0.0.1:3001');
 if (publicUrl.protocol !== 'https:' && !(publicUrl.protocol === 'http:' && ['localhost','127.0.0.1'].includes(publicUrl.hostname))) throw new Error('PUBLIC_URL must use HTTPS except for local development.');
 const username = setting('RMM_USERNAME') || 'admin';
 if (typeof setting('RMM_PASSWORD') !== 'string' || setting('RMM_PASSWORD').length < 16) throw new Error('Set RMM_PASSWORD to a unique password of at least 16 characters.');
-const salt = randomBytes(32), passwordHash = scryptSync(setting('RMM_PASSWORD'), salt, 64);
+
 const mesh = new MeshClient({ url: setting('MESH_URL'), username: setting('MESH_USERNAME'), password: setting('MESH_PASSWORD') });
 let acronis,acronisConnection={configured:false,authenticated:false,backupStatusVerified:false};
 const dataDir = resolve(process.env.DATA_DIR || resolve(root, 'data'));
@@ -40,6 +42,9 @@ await mkdir(dataDir, { recursive: true, mode: 0o700 });
 const db = new DatabaseSync(resolve(dataDir, 'rmm.sqlite'));
 db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS companies (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE); CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, at TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL);');
 initializeCatalog(db);
+await initializeUsers(db,username,setting('RMM_PASSWORD'));
+if(!db.prepare('PRAGMA table_info(audit)').all().some(c=>c.name==='actor'))db.exec("ALTER TABLE audit ADD COLUMN actor TEXT NOT NULL DEFAULT 'system'");
+const requestActor=new AsyncLocalStorage();
 db.exec('CREATE TABLE IF NOT EXISTS known_devices(id TEXT PRIMARY KEY, group_id TEXT NOT NULL, details TEXT NOT NULL)');
 db.exec('CREATE TABLE IF NOT EXISTS device_preferences(id TEXT PRIMARY KEY,name TEXT,hidden INTEGER NOT NULL DEFAULT 0)');
 const telemetryCache=new Map(),telemetryBusy=new Map();
@@ -48,6 +53,7 @@ db.exec("CREATE TABLE IF NOT EXISTS backup_preferences(company_id TEXT PRIMARY K
 db.exec("CREATE TABLE IF NOT EXISTS security_preferences(company_id TEXT PRIMARY KEY REFERENCES companies(id),provider TEXT NOT NULL CHECK(provider IN ('bitdefender','defender','acronis'))); CREATE TABLE IF NOT EXISTS security_settings(provider TEXT PRIMARY KEY CHECK(provider IN ('bitdefender','defender','acronis')),console_url TEXT NOT NULL)");
 initializeProviders(db,{url:setting('ACRONIS_URL'),clientId:setting('ACRONIS_CLIENT_ID')});
 const providerRegistry=await ProviderRegistry.open(db,resolve(dataDir,'provider-credentials.json'),{url:setting('ACRONIS_URL'),clientId:setting('ACRONIS_CLIENT_ID'),secret:setting('ACRONIS_CLIENT_SECRET')});let providerBusy=false;
+function featureProviders(kind){return providerRegistry.list(kind).map(({id,name,consoleUrl,guidance,adapter,apiConnected})=>({id,name,consoleUrl,guidance,adapter,apiConnected}));}
 function refreshAcronisProvider(){const row=db.prepare("SELECT * FROM integration_providers WHERE adapter='acronis-backup' LIMIT 1").get();acronis=new AcronisClient(row?providerRegistry.credentials(row):{});acronisConnection={configured:acronis.configured,authenticated:false,backupStatusVerified:false};}
 refreshAcronisProvider();
 initializePatches(db);
@@ -128,7 +134,7 @@ const sessions = new Map(), attempts = new Map();
 const lifetime = 8 * 60 * 60 * 1000;
 let snapshot = { groups: [], devices: [], lastSync: null, error: 'Waiting for first MeshCentral synchronization.' };
 let syncing;
-const audit = (action, target) => db.prepare('INSERT INTO audit(at,action,target) VALUES (?,?,?)').run(new Date().toISOString(), action, target);
+const audit = (action, target) => db.prepare('INSERT INTO audit(at,action,target,actor) VALUES (?,?,?,?)').run(new Date().toISOString(), action, target,requestActor.getStore()||'system');
 function synchronize() {
   if (syncing) return syncing;
   syncing = (async () => {
@@ -185,7 +191,8 @@ const cleanup = setInterval(() => {
 function session(req) {
   const id = /(?:^|;\s*)maldoori_session=([a-f0-9]{64})(?:;|$)/.exec(req.headers.cookie || '')?.[1];
   const value = sessions.get(id);
-  return value && value.expires > Date.now() ? { id, ...value } : null;
+  const user=value?publicUser(db.prepare('SELECT * FROM app_users WHERE id=?').get(value.userId)):null;
+  return value && value.expires > Date.now() && user?.active && user.version===value.version ? { id, ...value,user } : null;
 }
 function reply(res, status, value) { res.writeHead(status, { 'Content-Type':'application/json; charset=utf-8' }); res.end(JSON.stringify(value)); }
 async function body(req) {
@@ -195,7 +202,7 @@ async function body(req) {
   try { return JSON.parse(content); } catch { throw Object.assign(new Error('Invalid JSON.'), { status: 400 }); }
 }
 const cookie = (value, age) => `maldoori_session=${value}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${publicUrl.protocol === 'https:' ? '; Secure' : ''}`;
-const server = http.createServer(async (req, res) => {
+const server = http.createServer((req, res) => requestActor.run(null,async () => {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
@@ -208,21 +215,30 @@ const server = http.createServer(async (req, res) => {
       const entry = attempts.get(ip);
       if (entry && entry.until > Date.now() && entry.count >= 5) return reply(res, 429, { error: 'Too many login attempts. Try again in 15 minutes.' });
       const input = await body(req);
-      const supplied = scryptSync(typeof input.password === 'string' ? input.password : '', salt, 64);
-      if (input.username !== username || !timingSafeEqual(supplied, passwordHash)) {
+      const row=typeof input.username==='string'?db.prepare('SELECT * FROM app_users WHERE username=?').get(input.username.trim()):null;
+      const valid=await verifyPassword(row||db.prepare('SELECT * FROM app_users LIMIT 1').get(),input.password);
+      if (!row?.active || !valid) {
         attempts.set(ip, { count: (entry && entry.until > Date.now() ? entry.count : 0) + 1, until: entry && entry.until > Date.now() ? entry.until : Date.now() + 900000 });
         return reply(res, 401, { error: 'Invalid username or password.' });
       }
       attempts.delete(ip);
-      const id = randomBytes(32).toString('hex'); sessions.set(id, { expires: Date.now() + lifetime });
+      const id = randomBytes(32).toString('hex'); sessions.set(id, { expires: Date.now() + lifetime,userId:row.id,version:row.version });
       res.setHeader('Set-Cookie', cookie(id, lifetime / 1000));
-      audit('login', username); return reply(res, 200, { ok: true });
+      requestActor.enterWith(row.username);audit('login', row.id); return reply(res, 200, { ok: true });
     }
     if (url.pathname.startsWith('/api/')) {
       const current = session(req);
       if (!current) return reply(res, 401, { error: 'Sign in to continue.' });
+      requestActor.enterWith(current.user.username);
+      if(url.pathname==='/api/me'&&req.method==='GET')return reply(res,200,{user:current.user,features});
+      if(url.pathname==='/api/password-change'&&req.method==='POST'){const input=await body(req),user=await changePassword(db,current.user.id,input.currentPassword,input.password);for(const [id,value]of sessions)if(value.userId===user.id)sessions.delete(id);const id=randomBytes(32).toString('hex');sessions.set(id,{expires:Date.now()+lifetime,userId:user.id,version:user.version});res.setHeader('Set-Cookie',cookie(id,lifetime/1000));audit('password-changed',user.id);return reply(res,200,{user});}
+      if(current.user.mustChangePassword&&url.pathname!=='/api/logout')return reply(res,403,{error:'Change your initial password before using the workspace.'});
+      const permission=routePermission(url.pathname,req.method);
+      if(permission.admin&&current.user.role!=='admin'||permission.feature&&!allowed(current.user,permission.feature,permission.write))return reply(res,403,{error:'Your account does not have permission for this action.'});
+      if(url.pathname==='/api/users'&&req.method==='GET')return reply(res,200,{users:db.prepare('SELECT * FROM app_users ORDER BY name').all().map(publicUser),features});
+      if(url.pathname==='/api/user-save'&&req.method==='POST'){const input=await body(req),user=await saveUser(db,input,current.user.id);for(const [id,value]of sessions)if(value.userId===user.id&&id!==current.id)sessions.delete(id);if(user.id===current.user.id)sessions.get(current.id).version=user.version;audit(input.id?'user-updated':'user-created',user.id);return reply(res,200,{user});}
       if (req.method === 'POST' && url.pathname === '/api/logout') { sessions.delete(current.id); res.setHeader('Set-Cookie', cookie('', 0)); return reply(res, 200, { ok: true }); }
-      if (req.method === 'GET' && url.pathname === '/api/inventory') return reply(res, 200, { ...snapshot, ...catalog(db) });
+      if (req.method === 'GET' && url.pathname === '/api/inventory') {const data=catalog(db),hasInventory=current.user.role==='admin'||Object.keys(current.user.permissions).some(k=>k!=='scripts');if(!hasInventory)return reply(res,200,{groups:[],customers:[],companies:[],locations:[],deviceGroups:[],devices:[],lastSync:snapshot.lastSync,error:null});if(!allowed(current.user,'companies'))for(const key of ['customers','companies'])data[key]=data[key].map(({contact,email,phone,plan,...row})=>row);return reply(res, 200, { ...snapshot, ...data,devices:snapshot.devices.map(d=>({...d,desktopUrl:allowed(current.user,'remote',true)?d.desktopUrl:undefined})) });}
       if (req.method === 'POST' && url.pathname === '/api/sync') { await synchronize(); return reply(res, snapshot.error ? 502 : 200, snapshot.error ? { error: snapshot.error } : { ok:true }); }
       if(req.method==='POST'&&url.pathname==='/api/provider-console'){
         const input=await body(req);if(providerBusy)return reply(res,409,{error:'Provider settings are being updated.'});if(!['backup','security'].includes(input.kind)||typeof input.provider!=='string'||!providerRegistry.row(input.kind,input.provider))return reply(res,404,{error:'Provider not found.'});const url=consoleURL(input.consoleUrl);db.prepare("UPDATE integration_providers SET console_url=?,test_status='untested',test_detail='',tested_at=NULL WHERE kind=? AND id=?").run(url,input.kind,input.provider);audit('provider-console-configured',input.kind+':'+input.provider);return reply(res,200,{ok:true});
@@ -289,7 +305,7 @@ const server = http.createServer(async (req, res) => {
         if(url.pathname==='/api/ticket-review')return reply(res,200,await reviewTicket(input.id));
         if(url.pathname==='/api/ticket-delete'){if(input.confirm!==true)return reply(res,400,{error:'Confirm ticket deletion.'});db.prepare('UPDATE tickets SET deleted_at=?,updated_at=? WHERE id=?').run(at,at,input.id);audit('ticket-deleted',input.id);}
         else if(url.pathname==='/api/ticket-status'){if(!['open','in_progress','resolved'].includes(input.status))return reply(res,400,{error:'Choose a valid ticket status.'});db.prepare('UPDATE tickets SET status=?,updated_at=? WHERE id=?').run(input.status,at,input.id);audit('ticket-status-changed',input.id);}
-        else{if(typeof input.note!=='string'||!input.note.trim()||input.note.length>10000)return reply(res,400,{error:'Enter a note of 1–10,000 characters.'});db.prepare('INSERT INTO ticket_messages VALUES (?,?,?,?,?,?)').run(randomBytes(16).toString('hex'),input.id,input.note.trim(),username,'internal',at);db.prepare("UPDATE tickets SET updated_at=?,ai='{}' WHERE id=?").run(at,input.id);audit('ticket-note-added',input.id);}
+        else{if(typeof input.note!=='string'||!input.note.trim()||input.note.length>10000)return reply(res,400,{error:'Enter a note of 1–10,000 characters.'});db.prepare('INSERT INTO ticket_messages VALUES (?,?,?,?,?,?)').run(randomBytes(16).toString('hex'),input.id,input.note.trim(),current.user.username,'internal',at);db.prepare("UPDATE tickets SET updated_at=?,ai='{}' WHERE id=?").run(at,input.id);audit('ticket-note-added',input.id);}
         return reply(res,200,{ok:true});
       }
       if(req.method==='POST' && url.pathname==='/api/telemetry'){
@@ -394,7 +410,7 @@ const server = http.createServer(async (req, res) => {
           if(jobId){db.prepare("INSERT INTO patch_notice_jobs VALUES (?,?,?,?, 'running')").run(jobId,patch.id,input.companyId,at);for(const d of devices)db.prepare('INSERT INTO patch_notice_targets VALUES (?,?,?,?,?)').run(jobId,d.id,d.name,d.online?'queued':'offline',d.online?'Waiting to send.':'Computer is offline. No notice is queued for later delivery.');}db.exec('COMMIT');}catch(error){db.exec('ROLLBACK');throw error;}
         audit('patch-rollout-planned',input.patchId);if(jobId)startCompanyNotice(jobId,devices,patch,notice);return reply(res,200,{ok:true,planned:devices.length,executed:false,jobId});
       }
-      if(req.method==='GET' && url.pathname==='/api/security')return reply(res,200,{preferences:db.prepare('SELECT * FROM security_preferences').all(),providers:providerRegistry.list('security')});
+      if(req.method==='GET' && url.pathname==='/api/security')return reply(res,200,{preferences:db.prepare('SELECT * FROM security_preferences').all(),providers:featureProviders('security')});
       if(req.method==='POST' && url.pathname==='/api/security-provider'){
         const input=await body(req);
         if(typeof input.companyId!=='string'||!db.prepare('SELECT id FROM companies WHERE id=?').get(input.companyId))return reply(res,404,{error:'Company not found.'});
@@ -410,7 +426,7 @@ const server = http.createServer(async (req, res) => {
         db.prepare("UPDATE integration_providers SET console_url=?,test_status='untested',test_detail='',tested_at=NULL WHERE kind=? AND id=?").run(consoleUrl,'security',input.provider);
         audit('security-console-configured',input.provider);return reply(res,200,{ok:true});
       }
-      if(req.method==='GET' && url.pathname==='/api/backup-providers'){const providers=providerRegistry.list('backup');return reply(res,200,{preferences:db.prepare('SELECT * FROM backup_preferences').all(),providers,...Object.fromEntries(providers.map(p=>[p.id,{consoleUrl:p.consoleUrl,apiConnected:p.apiConnected}]))});}
+      if(req.method==='GET' && url.pathname==='/api/backup-providers'){const providers=featureProviders('backup');return reply(res,200,{preferences:db.prepare('SELECT * FROM backup_preferences').all(),providers,...Object.fromEntries(providers.map(p=>[p.id,{consoleUrl:p.consoleUrl,apiConnected:p.apiConnected}]))});}
       if(req.method==='POST' && url.pathname==='/api/backup-provider'){
         const input=await body(req);
         if(!db.prepare('SELECT id FROM companies WHERE id=?').get(input.companyId||''))return reply(res,404,{error:'Company not found.'});
@@ -596,7 +612,7 @@ const server = http.createServer(async (req, res) => {
     const safe = error.status || error.message.startsWith('MeshCentral') || error.message.startsWith('Cannot connect') || error.message.startsWith('Unexpected MeshCentral');
     reply(res, error.status || 502, { error: safe ? error.message : 'Operation failed. Check the integration configuration and account permissions.' });
   }
-});
+}));
 if(ticketAI.configured&&ticketAI.auto)void drainTicketAI().catch(()=>{});
 const monitoringPoll=setInterval(()=>{if(db.prepare('SELECT id FROM monitor_rules WHERE enabled=1 LIMIT 1').get())void monitoringCheck();},60000);monitoringPoll.unref();
 const ticketMailPoll=setInterval(()=>{if(ticketMailbox.configured)syncTicketMail().catch(()=>{});},60000);ticketMailPoll.unref();if(ticketMailbox.configured)syncTicketMail().catch(()=>{});
