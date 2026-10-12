@@ -1,4 +1,4 @@
-// Maldoori desktop launch hook v1. Uses the ordinary Connect button once.
+// Maldoori desktop launch hook v2. Uses the ordinary Connect button once.
 (function () {
     var launch = new URL(window.location.href);
     if (launch.searchParams.get('maldooriConnect') !== '1') return;
@@ -13,6 +13,11 @@
             typeof meshserver === 'undefined' || !meshserver || meshserver.State !== 2) return;
         if (typeof xxdialogMode !== 'undefined' && xxdialogMode) return;
         if (typeof desktop === 'undefined') return;
+        // Native desktop-only layout retains connection/session controls and consent dialogs.
+        if (launch.searchParams.get('maldooriDesktop') === '1' &&
+            typeof deskToggleFull === 'function' && typeof fullscreen !== 'undefined' && !fullscreen) {
+            deskToggleFull({ shiftKey: false });
+        }
         if (desktop !== null) { window.clearInterval(timer); return; }
         var button = document.getElementById('connectbutton1');
         if (!button || button.disabled || button.offsetParent === null) return;

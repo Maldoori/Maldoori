@@ -187,3 +187,24 @@ Administrators can create/edit employee accounts, deactivate accounts, reset pas
 Use a unique initial password of at least 16 characters and share it privately. Employees must change initial/reset passwords before using APIs or the workspace. My account changes your own password. Passwords are salted scrypt hashes; no password/hash is returned by user APIs. Permission changes, deactivation and administrator resets invalidate sessions immediately on subsequent requests; password changes sign out other sessions. Your own administrator account cannot be demoted/deactivated and the last active administrator is protected. Deactivate departing employees rather than deleting their account. Audit events include the signed-in username (background jobs use `system`).
 
 Email invitations and self-service email password recovery are not implemented. MeshCentral and vendor consoles require their own accounts: SkyBase permissions do not alter authorization inside those external applications. In-progress actions already accepted before access was revoked may finish.
+
+### Attended remote desktop and client privacy
+
+RMM desktop links now request MeshCentral's desktop-only view (`hide=31`, native desktop fullscreen via the reviewed launch hook). The full browser chrome is unchanged; connection controls remain available. This is a layout change, not authorization isolation. Ordinary MeshCentral URLs retain their normal layout.
+
+On the reviewed MeshCentral **1.1.59** server, deploy from `/opt/maldoori`:
+
+```sh
+sudo python3 scripts/configure-meshcentral-consent.py
+sudo python3 scripts/install-meshcentral-autoconnect.py
+pm2 restart meshcentral
+pm2 restart maldoori
+```
+
+The consent installer updates only the primary domain (empty domain ID; use `--domain ID` for another domain). It preserves other settings, writes an owner-only configuration backup and requires desktop prompt/notification/privacy bar. Desktop requests have a 60-second consent timeout; automatic acceptance on timeout, absent user or locked desktop is disabled. Existing terminal/file consent flags are preserved. This domain policy applies to agent desktop connections throughout that MeshCentral domain, including ordinary browser links, rather than relying on a browser notification. Unattended desktop sessions may consequently stop working; this is the requested attended support policy. Intel AMT/RDP and external remote-access software are separate paths and are not covered by this agent-desktop policy.
+
+The template installer upgrades recognized v1 SkyBase/Maldoori overrides to v2 and keeps a template backup. It refuses unrelated custom templates or another MeshCentral version. If an installer refuses, preserve the existing configuration and review the reason rather than editing package files. Restarting MeshCentral temporarily interrupts its connections. After an upgrade, remove/rebuild the generated override against a reviewed package version.
+
+Test on a spare Windows PC with a signed-in user: Connect from RMM; no screen/input should be available before **Allow**. **Deny**, ignoring the prompt for 60 seconds, and having no interactive user must not grant access. Verify a new connection prompts again and the privacy bar/connection notification is visible after acceptance. Disconnect before testing a locked desktop. Record real client results in the test tracker; automated tests verify configuration and launch behavior, not live Windows consent delivery. The prompt identifies the authenticated MeshCentral account; individual employee attribution requires separate MeshCentral technician accounts rather than sharing the integration login.
+
+To undo the configuration change, restore the specific private `config.json.skybase-consent-backup-*` file created by the installer to `meshcentral-data/config.json`, then restart MeshCentral. This restores prior privacy policy and should be done only deliberately. Template backups live beside the generated template; restore the matching previous file if needed. Never publish/upload MeshCentral configuration backups because they may contain secrets.

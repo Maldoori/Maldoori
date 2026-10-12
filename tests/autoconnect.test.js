@@ -21,3 +21,10 @@ test('desktop launch is opt-in and clicks once only after the target is ready',(
   f.context.meshserver.State=2;f.tick();f.tick();assert.equal(f.clicks,1);
   const existing=fixture();existing.context.desktop={};existing.tick();assert.equal(existing.clicks,0);
 });
+
+test('desktop-only launch uses native layout once and leaves normal MeshCentral navigation alone',()=>{
+  const f=fixture('https://mesh.example/?node=target&viewmode=11&maldooriConnect=1&maldooriDesktop=1');let toggles=0;
+  f.context.fullscreen=false;f.context.deskToggleFull=e=>{assert.equal(e.shiftKey,false);toggles++;f.context.fullscreen=true;};
+  f.tick();f.tick();assert.equal(toggles,1);assert.equal(f.clicks,1);
+  const ordinary=fixture();ordinary.context.fullscreen=false;ordinary.context.deskToggleFull=()=>{throw new Error('Ordinary view must remain unchanged');};ordinary.tick();assert.equal(ordinary.clicks,1);
+});

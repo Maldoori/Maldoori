@@ -111,6 +111,8 @@ test('authenticated enrollment, synchronization, remote links, stale data, and p
   let result=await api('inventory'); assert.equal(result.data.devices[0].name,'REAL-WINDOWS');
   assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('node'),'original-device');
   assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('viewmode'),'11');
+  assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('hide'),'31');
+  assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('maldooriDesktop'),'1');
   assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.has('gotonode'),false);
   assert.equal(new URL(result.data.devices[0].desktopUrl).searchParams.get('maldooriConnect'),'1');
   assert.equal(result.data.devices[0].mapped,false);
