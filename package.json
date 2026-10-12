@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node server.js",
     "start": "node server.js",
-    "check": "node --check server.js && node --check src/app.js && node --check rmm-server.js && node --check lib/acronis.js && node --check lib/acronis-inventory.js && node --check lib/mesh.js && node --check lib/catalog.js && node --check lib/services.js && node --check lib/telemetry.js && node --check src/live.js && node --check scripts/meshcentral-autoconnect.js && node --check lib/tickets.js && node --check lib/ticket-integrations.js && node --check src/script-library.js && node --check lib/ai-agents.js && node --check lib/providers.js && node --check lib/monitoring.js && node --check lib/users.js",
+    "check": "node --check server.js && node --check src/app.js && node --check rmm-server.js && node --check lib/acronis.js && node --check lib/acronis-inventory.js && node --check lib/mesh.js && node --check lib/catalog.js && node --check lib/services.js && node --check lib/telemetry.js && node --check src/live.js && node --check scripts/meshcentral-autoconnect.js && node --check lib/tickets.js && node --check lib/ticket-integrations.js && node --check src/script-library.js && node --check lib/ai-agents.js && node --check lib/providers.js && node --check lib/monitoring.js && node --check lib/users.js && node --check scripts/meshcentral-desktop-privacy.js",
     "live": "node --env-file=.env rmm-server.js",
     "test": "node --test tests/*.test.js"
   },

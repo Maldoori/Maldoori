@@ -13,8 +13,8 @@ root = parser.parse_args().root
 package = root / 'node_modules/meshcentral'
 source = package / 'views/default.handlebars'
 destination = root / 'meshcentral-web/views/default.handlebars'
-marker = '// Maldoori desktop launch hook v2.'
-old_marker = '// Maldoori desktop launch hook v1.'
+marker = '// Maldoori desktop launch hook v3.'
+old_markers = ('// Maldoori desktop launch hook v1.', '// Maldoori desktop launch hook v2.')
 version = json.loads((package / 'package.json').read_text()).get('version')
 if version != '1.1.59':
     raise SystemExit('Stopped: this override was reviewed for MeshCentral 1.1.59 only.')
@@ -28,7 +28,7 @@ if destination.is_symlink():
     raise SystemExit('Stopped: the custom template must not be a symbolic link.')
 if destination.parent.exists():
     for file in destination.parent.glob('default*.handlebars'):
-        if file != destination or not any(m in file.read_text() for m in (marker, old_marker)):
+        if file != destination or not any(m in file.read_text() for m in (marker, *old_markers)):
             raise SystemExit('Stopped: an existing custom desktop template needs review.')
 if destination.exists() and marker in destination.read_text():
     print('Maldoori launch override is already installed; no changes made.')
@@ -36,9 +36,9 @@ if destination.exists() and marker in destination.read_text():
 template = source.read_text()
 if destination.exists():
     previous = destination.read_text()
-    restored, count = re.subn(r'<script>\s*// Maldoori desktop launch hook v1\.[\s\S]*?</script>\s*(?=</body>)', '', previous)
+    restored, count = re.subn(r'<script>\s*// Maldoori desktop launch hook v[12]\.[\s\S]*?</script>\s*(?=</body>)', '', previous)
     if count != 1 or restored.strip() != template.strip():
-        raise SystemExit('Stopped: the existing v1 template has other custom changes; review before replacing it.')
+        raise SystemExit('Stopped: the existing launch template has other custom changes; review before replacing it.')
 if template.count('</body>') != 1 or 'id=connectbutton1 ' not in template or 'function connectDesktop(' not in template:
     raise SystemExit('Stopped: desktop template structure differs from the reviewed version.')
 hook = (Path(__file__).parent / 'meshcentral-autoconnect.js').read_text()
